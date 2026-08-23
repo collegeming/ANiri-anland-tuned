@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(have_libinput_plugin_system)");
+    println!("cargo:rustc-check-cfg=cfg(have_anland_audio)");
     if pkg_config::Config::new()
         .atleast_version("1.30.0")
         .probe("libinput")

@@ -38,17 +38,18 @@ use crate::utils::{get_monotonic_time, logical_output};
 
 /// How often we poll the consumer for input, buffer-ready and reconnects.
 ///
-/// The anland transport is lockstep and exposes no fds to the event loop, so we
-/// poll the consumer's buffer-ready eventfd and data socket on a timer. The
-/// buffer-ready signal fires at the *display refresh rate* (the consumer keeps
-/// cycling buffers even on a static desktop), so polling faster than ~half a
-/// frame only burns CPU waking a thread that finds nothing — 1 ms used to fire
-/// ~1000×/s while only ~60–120 of those polls actually found a buffer-ready.
+/// The anland transport is lockstep and exposes pollable, session-scoped fds,
+/// but they are replaced across fallback/reconnect and are not registered with
+/// calloop here. We therefore poll the consumer's buffer-ready eventfd and data
+/// socket on a timer. The buffer-ready signal fires at the *display refresh rate*
+/// (the consumer keeps cycling buffers even on a static desktop), so polling
+/// faster than ~half a frame only burns CPU waking a thread that finds nothing —
+/// 1 ms used to fire ~1000×/s while only ~60–120 of those polls actually found a
+/// buffer-ready.
 ///
 /// We therefore sample at *half the frame period*, clamped to a safe window:
-///   - never slower than `MAX` (≈8 ms): a 60 Hz panel still gets ~2 samples per
-///     frame so a buffer-ready is never missed, and the lockstep pipeline only
-///     shifts by at most one frame;
+///   - never slower than `MAX` (≈8 ms): a 60 Hz panel gets ~2 samples per frame,
+///     bounding buffer-ready pickup latency below one frame;
 ///   - never faster than `MIN` (≈2 ms): no point polling quicker than the
 ///     consumer can produce frames, and 2 ms is already well below any panel's
 ///     refresh.
