@@ -318,9 +318,7 @@ impl Anland {
         } else {
             half_frame
         };
-        info!(
-            "anland: poll interval = {poll_interval:?} (refresh {refresh_hz:.0} Hz)"
-        );
+        info!("anland: poll interval = {poll_interval:?} (refresh {refresh_hz:.0} Hz)");
 
         let timer = Timer::from_duration(poll_interval);
         niri.event_loop
@@ -694,7 +692,11 @@ impl Anland {
                 // socket and desyncs the message framing, stalling all input.
                 if matches!(t, ffi::INPUT_TYPE_CLIPBOARD | ffi::INPUT_TYPE_TEXT_INPUT) {
                     let size = unsafe { raw.data.clipboard.size };
-                    if size > 0 {
+                    if size == 0 {
+                        if t == ffi::INPUT_TYPE_CLIPBOARD {
+                            self.set_compositor_clipboard(niri, String::new());
+                        }
+                    } else {
                         let mut buf = vec![0u8; size as usize];
                         let r = unsafe {
                             ffi::poll_input_event_extend_data(
@@ -704,7 +706,7 @@ impl Anland {
                                 100,
                             )
                         };
-                        if r < 0 {
+                        if r != 1 {
                             warn!("anland: failed draining input payload");
                         } else if t == ffi::INPUT_TYPE_CLIPBOARD {
                             if let Ok(text) = String::from_utf8(buf) {
