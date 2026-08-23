@@ -1,162 +1,181 @@
-<h1 align="center"><img alt="niri" src="https://github.com/user-attachments/assets/07d05cd0-d5dc-4a28-9a35-51bae8f119a0"></h1>
-<p align="center">A scrollable-tiling Wayland compositor, but with anland support.</p>
-<p align="center">
-    <a href="https://matrix.to/#/#niri:matrix.org"><img alt="Matrix" src="https://img.shields.io/badge/matrix-%23niri-blue?logo=matrix"></a>
-    <a href="https://github.com/niri-wm/niri/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/niri-wm/niri"></a>
-    <a href="https://github.com/niri-wm/niri/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/niri-wm/niri?logo=github"></a>
-</p>
+# ANiri anland tuned
 
-<p align="center">
-    <a href="https://niri-wm.github.io/niri/Getting-Started.html">Getting Started</a> | <a href="https://niri-wm.github.io/niri/Configuration%3A-Introduction.html">Configuration</a> | <a href="https://github.com/niri-wm/niri/discussions/325">Setup&nbsp;Showcase</a>
-</p>
+面向 **Droidspaces + Arch Linux + niri/ANiri** 场景优化的 Wayland 合成器。
 
-<img width="1280" height="720" alt="niri with a few windows open" src="https://github.com/user-attachments/assets/dea5909e-1859-4aaa-9d88-d37f9663e00b" />
+本项目让运行在 Android Droidspaces 容器中的 Arch Linux 桌面可以通过 anland 直接渲染到 Android 提供的 GPU 缓冲区，并针对长期运行和远程 RDP 访问补充了低唤醒轮询、可靠重连与完整剪贴板清空语义。
 
-## Android supports (Anland in Droidspaces)
+> 本仓库不是通用 niri 的替代发行版，也不负责 RDP 编码。它是整套远程访问方案中的 **Linux 合成器与输入终点**。
 
-This tree adds an **anland** backend that renders the desktop into GPU buffers presented by an Android surface. it runs the whole niri desktop on a android-based phone. the anland backend is selected automatically when `ANLAND=1` is set.
+## 与上游仓库的关系
 
-thanks to:
+| 仓库 | 关系 |
+|---|---|
+| [`niri-wm/niri`](https://github.com/niri-wm/niri) | niri 原始项目，提供滚动平铺 Wayland 合成器的主体实现 |
+| [`Celvra/ANiri`](https://github.com/Celvra/ANiri) | 本仓库的直接代码来源，在 niri 基础上加入 anland 后端和 Android 运行支持 |
+| [`superturtlee/anland`](https://github.com/superturtlee/anland) | ANiri 使用的 Android/Linux GPU 缓冲区共享协议与配套实现来源 |
+| `collegeming/ANiri-anland-tuned` | 在 ANiri 基础上，针对 Droidspaces、Arch、低功耗运行和远程访问继续维护的场景化分支 |
 
-- [Anland - A buffer‑sharing protocol](https://github.com/superturtlee/anland)
-- [Droidspaces - A lightweight, LXC-like container runtime for Android and Linux](https://github.com/ravindu644/Droidspaces-OSS)
-- [Original niri](https://github.com/niri-wm/niri)
+由于远程仓库曾删除后重新创建，GitHub 当前不会显示 `Forked from` / `parent` 元数据；这不改变上述实际代码继承关系。本仓库会尽量保留上游 niri/ANiri 的结构、许可证和开发习惯，场景无关的功能应优先回到对应上游讨论。
 
-anland backend is still in developing. the known issues are:
+## 改造背景
 
-- [ ] glmark2/vkmark scores are a bit lower than kwin.
-- [ ] when using android's floating window on consumer app may cause screen glitches.
-- [ ] the microphone/camera forwarding can work properly but applications cannot read them. im not sure if there is a problem with my environment.
+目标运行环境不是传统 Linux PC，而是：
 
-working features:
-- [x] use kgsl to render niri (some applications will fallback to llvmpipe)
-- [x] anland v3's clipboard forwarding
-- [x] vulkan and opengl (test with glmark2 and vkmark)
-etc.
+1. Android 设备通过 **Droidspaces** 运行接近 LXC 形态的 Linux 容器；
+2. 容器用户空间使用 **Arch Linux / Arch Linux ARM**；
+3. 桌面使用带 anland 后端的 **niri/ANiri**；
+4. ANiri 不直接驱动物理显示器，而是把桌面渲染到 Android consumer 提供的 dmabuf；
+5. 用户希望在 Windows PC 上通过系统自带的 `mstsc` 远程访问这个 Linux 桌面。
 
-this projects have already tested on my OnePlus 13 with archlinuxarm container (with droidspaces support kernel) and working properly. 
+这个场景对远程访问有几项特殊要求：
 
-[How to install](https://x0.fan/posts/install-niri-on-anland/)
+- 只传输 ANiri/anland 的 Linux 桌面，不能录制或发送整个 Android 屏幕；
+- 视频由 Android `MediaCodec` 硬件 H.264 编码，不能在 Arch 容器里使用 OpenH264 软件编码；
+- 键盘、鼠标、滚轮和剪贴板要直接进入 ANiri；
+- PC 的 Win/Super 键必须保持原值，例如 `Win+E` 到达 niri 后仍是 `Mod+E`；
+- 空剪贴板也必须能同步为“清空”，不能被当成无效事件丢弃；
+- 本地无 consumer 或远程会话断开时，不能继续用 1 ms 定时器高频唤醒 CPU。
 
-## About
+为完成整个链路，本项目与以下两个仓库配套：
 
-Windows are arranged in columns on an infinite strip going to the right.
-Opening a new window never causes existing windows to resize.
+- [`collegeming/anland-bridge`](https://github.com/collegeming/anland-bridge)：Android consumer、硬件编码和本地认证桥；
+- [`collegeming/lamco-anland-bridge`](https://github.com/collegeming/lamco-anland-bridge)：向 `mstsc` 提供 RDP/TLS、EGFX AVC420、输入和 CLIPRDR。
 
-Every monitor has its own separate window strip.
-Windows can never "overflow" onto an adjacent monitor.
+## 本仓库负责什么
 
-Workspaces are dynamic and arranged vertically.
-Every monitor has an independent set of workspaces, and there's always one empty workspace present all the way down.
+```text
+Windows mstsc
+    │ RDP 输入 / CLIPRDR
+    ▼
+lamco-anland-bridge（Arch 容器）
+    │ 本地认证桥
+    ▼
+Android anland consumer
+    │ anland data socket：真实 evdev 按键、指针、剪贴板
+    ▼
+ANiri / Smithay
+    │ EGL 渲染
+    ▼
+Android 提供的 dmabuf / MediaCodec input Surface
+```
 
-The workspace arrangement is preserved across disconnecting and connecting monitors where it makes sense.
-When a monitor disconnects, its workspaces will move to another monitor, but upon reconnection they will move back to the original monitor.
+ANiri 是最终的 Wayland 合成器、输入处理者和桌面剪贴板拥有者。RDP 协议、TLS 和 H.264 封装不在本仓库实现。
 
-## Features
+## 本次主要修改
 
-- Built from the ground up for scrollable tiling
-- [Dynamic workspaces](https://niri-wm.github.io/niri/Workspaces.html) like in GNOME
-- An [Overview](https://github.com/user-attachments/assets/379a5d1f-acdb-4c11-b36c-e85fd91f0995) that zooms out workspaces and windows
-- Built-in screenshot UI
-- Monitor and window screencasting through xdg-desktop-portal-gnome
-    - You can [block out](https://niri-wm.github.io/niri/Configuration%3A-Window-Rules.html#block-out-from) sensitive windows from screencasts
-    - [Dynamic cast target](https://niri-wm.github.io/niri/Screencasting.html#dynamic-screencast-target) that can change what it shows on the go
-- [Touchpad](https://github.com/niri-wm/niri/assets/1794388/946a910e-9bec-4cd1-a923-4a9421707515) and [mouse](https://github.com/niri-wm/niri/assets/1794388/8464e65d-4bf2-44fa-8c8e-5883355bd000) gestures
-- Group windows into [tabs](https://niri-wm.github.io/niri/Tabs.html)
-- Configurable layout: gaps, borders, struts, window sizes
-- [Gradient borders](https://niri-wm.github.io/niri/Configuration%3A-Layout.html#gradients) with Oklab and Oklch support
-- [Background blur](https://niri-wm.github.io/niri/Window-Effects.html) for windows and layer-shell surfaces
-- [Animations](https://github.com/niri-wm/niri/assets/1794388/ce178da2-af9e-4c51-876f-8709c241d95e) with support for [custom shaders](https://github.com/niri-wm/niri/assets/1794388/27a238d6-0a22-4692-b794-30dc7a626fad)
-- Live-reloading config
-- Works with [screen readers](https://niri-wm.github.io/niri/Accessibility.html)
+### 1. 面向刷新率的自适应轮询
 
-## Video Demo
+ANiri 原先固定每 1 ms 轮询 anland consumer。对于 60～120 Hz 显示链路，大部分唤醒都拿不到新缓冲区，只会增加容器 CPU 唤醒和手机发热。
 
-https://github.com/niri-wm/niri/assets/1794388/bce834b0-f205-434e-a027-b373495f9729
+当前策略：
 
-Also check out these videos that showcase a lot of the niri functionality:
+- 活跃连接按显示刷新率的半帧周期轮询；
+- 轮询间隔限制在 **2～8 ms**；
+- consumer 断开或处于 fallback 时退避到 **500 ms**；
+- 重连后自动恢复活跃间隔；
+- 不接管 C 层拥有且会在重连时替换的借用文件描述符，避免把失效 fd 注册进 calloop。
 
-- [Niri Is My New Favorite Wayland Compositor](https://www.youtube.com/watch?v=DeYx2exm04M) by Brodie Robertson
-- [How Is niri This Good? Live Demo + Config](https://www.youtube.com/watch?v=7XmD5UyyhZQ) by Nick Janetakis
+典型情况下，60 Hz 从约 1000 次/秒降到约 125 次/秒，120 Hz 降到约 250 次/秒，同时仍保持每帧约两次采样。
 
-## Status
+### 2. 可靠的变长输入消息
 
-Niri is stable for day-to-day use and does most things expected of a Wayland compositor.
-Many people are daily-driving niri, and are happy to help in our [Matrix channel].
+anland 的剪贴板和文本输入使用“固定事件头 + 变长 UTF-8 负载”。本分支确保：
 
-Give it a try!
-Follow the instructions on the [Getting Started](https://niri-wm.github.io/niri/Getting-Started.html) page.
-Grab a desktop shell like [DankMaterialShell] or [Noctalia] (or build a more traditional setup): niri by itself is not a complete desktop environment.
-Also check out [awesome-niri], a list of niri-related links and projects.
+- 每个变长负载都被完整读取，避免剩余字节破坏后续消息边界；
+- 只有 `poll_input_event_extend_data()` 明确返回完整成功时才使用数据；
+- 超时或读取失败不会把零填充缓冲区误当成有效剪贴板；
+- 非法 UTF-8 不会写入 compositor clipboard。
 
-Here are some points you may have questions about:
+### 3. 空剪贴板清空
 
-- **Multi-monitor**: yes, a core part of the design from the very start. Mixed DPI works.
-- **Fractional scaling**: yes, plus all niri UI stays pixel-perfect.
-- **NVIDIA**: seems to work fine.
-- **Floating windows**: yes, starting from niri 25.01.
-- **Input devices**: niri supports tablets, touchpads, and touchscreens.
-You can map the tablet to a specific monitor, or use [OpenTabletDriver].
-We have touchpad gestures, but no touchscreen gestures yet.
-- **Wlr protocols**: yes, we have most of the important ones like layer-shell, gamma-control, screencopy.
-You can check on [wayland.app](https://wayland.app) at the bottom of each protocol's page.
-- **Performance**: while I run niri on beefy machines, I try to stay conscious of performance.
-I've seen someone use it fine on an Eee PC 900 from 2008, of all things.
-- **Xwayland**: [integrated](https://niri-wm.github.io/niri/Xwayland.html#using-xwayland-satellite) via xwayland-satellite starting from niri 25.08.
+`clipboard.size == 0` 现在具有明确语义：清空 ANiri 的 compositor clipboard。
 
-## Media
+这使 `mstsc → Android → ANiri` 和反向链路都可以正确同步“清空剪贴板”，而不只是非空文本。
 
-[niri: Making a Wayland compositor in Rust](https://youtu.be/Kmz8ODolnDg?list=PLRdS-n5seLRqrmWDQY4KDqtRMfIwU0U3T) · *December 2024*
+### 4. 构建配置清理
 
-My talk from the 2024 Moscow RustCon about niri, and how I do randomized property testing and profiling, and measure input latency.
-The talk is in Russian, but I prepared full English subtitles that you can find in YouTube's subtitle language selector.
+为 anland 可选音频/相机编译路径声明自定义 cfg，避免新版 Rust 的 `unexpected_cfgs` 噪声，同时不强制引入这些可选组件。
 
-[An interview with Ivan, the developer behind Niri](https://www.trommelspeicher.de/podcast/special_the_developer_behind_niri) · *June 2025*
+## 可实现的效果
 
-An interview by a German tech podcast Das Triumvirat (in English).
-We talk about niri development and history, and my experience building and maintaining niri.
+与另外两个配套仓库一起使用时，可以实现：
 
-[A tour of the niri scrolling-tiling Wayland compositor](https://lwn.net/Articles/1025866/) · *July 2025*
+- 在 Droidspaces 的 Arch 容器里运行完整 ANiri/niri 桌面；
+- ANiri 继续直接渲染到 Android 管理的 GPU 缓冲区；
+- Windows 使用标准 `mstsc` 访问，不需要自定义 PC 客户端；
+- 只传输 Linux 桌面，不捕获 Android 主屏幕；
+- PC 键盘、鼠标、滚轮直接进入 Smithay/anland 输入路径；
+- Win/Super 键不做 Alt 映射，niri `Mod` 快捷键可以按原值触发；
+- UTF-8 文本和空剪贴板双向同步；
+- 本地 consumer 断开时降低轮询频率，减少无效唤醒和待机发热；
+- consumer 重连、缓冲区重分配后重新导入 dmabuf 并请求重绘。
 
-An LWN article with a nice overview and introduction to niri.
+## 构建
 
-## Contributing
+首先按 niri 上游文档安装 Rust 与 Wayland 合成器构建依赖：
 
-If you'd like to help with niri, there are plenty of both coding- and non-coding-related ways to do so.
-See [CONTRIBUTING.md](https://github.com/niri-wm/niri/blob/main/CONTRIBUTING.md) for an overview.
+- [niri Getting Started](https://niri-wm.github.io/niri/Getting-Started.html)
+- [niri Packaging](https://github.com/niri-wm/niri/wiki/Packaging-niri)
 
-## Inspiration
+在 Arch 环境中构建：
 
-Niri is heavily inspired by [PaperWM] which implements scrollable tiling on top of GNOME Shell.
+```bash
+git clone https://github.com/collegeming/ANiri-anland-tuned.git
+cd ANiri-anland-tuned
+git switch anland-poll-optimize
+cargo build --release
+```
 
-One of the reasons that prompted me to try writing my own compositor is being able to properly separate the monitors.
-Being a GNOME Shell extension, PaperWM has to work against Shell's global window coordinate space to prevent windows from overflowing.
+开发检查：
 
-## Tile Scrollably Elsewhere
+```bash
+cargo fmt --all -- --check
+cargo check
+```
 
-Here are some other projects which implement a similar workflow:
+## 启动 anland 后端
 
-- [PaperWM]: scrollable tiling on top of GNOME Shell.
-- [karousel]: scrollable tiling on top of KDE.
-- [scroll](https://github.com/dawsers/scroll) and [papersway]: scrollable tiling on top of sway/i3.
-- Hyprland has a built-in [scrolling layout](https://wiki.hypr.land/Configuring/Layouts/Scrolling-Layout/).
-- [Paneru] and [PaperWM.spoon]: scrollable tiling on top of macOS.
+设置 `ANLAND` 即选择 anland 后端：
 
-## Contact
+```bash
+ANLAND=1 ./target/release/niri --session
+```
 
-Our main communication channel is a Matrix chat, feel free to join and ask a question: https://matrix.to/#/#niri:matrix.org
+默认 daemon socket 为 `/run/display.sock`，也可以显式指定：
 
-We also have a community Discord server: https://discord.gg/vT8Sfjy7sx
+```bash
+ANLAND=1 \
+ANLAND_SOCKET=/run/display.sock \
+./target/release/niri --session
+```
 
-[PaperWM]: https://github.com/paperwm/PaperWM
-[waybar]: https://github.com/Alexays/Waybar
-[fuzzel]: https://codeberg.org/dnkl/fuzzel
-[awesome-niri]: https://github.com/niri-wm/awesome-niri
-[karousel]: https://github.com/peterfajdiga/karousel
-[papersway]: https://spwhitton.name/tech/code/papersway/
-[Paneru]: https://github.com/karinushka/paneru
-[PaperWM.spoon]: https://github.com/mogenson/PaperWM.spoon
-[Matrix channel]: https://matrix.to/#/#niri:matrix.org
-[OpenTabletDriver]: https://opentabletdriver.net/
-[DankMaterialShell]: https://danklinux.com/
-[Noctalia]: https://noctalia.dev/
+可通过 `ANLAND_DRM_DEVICE` 指定 EGL/DRM 渲染设备。实际 Droidspaces 启动脚本、KGSL 权限和 socket 映射取决于设备内核与容器配置。
+
+## 配套仓库
+
+建议使用相互匹配的三个分支：
+
+| 组件 | 仓库 | 分支 |
+|---|---|---|
+| ANiri 合成器 | 本仓库 | `anland-poll-optimize` |
+| Android/anland bridge | [`collegeming/anland-bridge`](https://github.com/collegeming/anland-bridge) | `bridge-service-toggle` |
+| RDP 服务端 | [`collegeming/lamco-anland-bridge`](https://github.com/collegeming/lamco-anland-bridge) | `anland-bridge` |
+
+## 当前边界
+
+- 这是针对单个 anland 输出的场景化实现，不等同于 niri 上游支持矩阵；
+- RDP 视频编码、TLS 和认证由配套仓库完成；
+- 非 ASCII 的直接 Unicode 按键仍受当前 evdev wire path 限制，Unicode 文本可通过剪贴板完整传输；
+- Android 隐藏 `ANativeWindow` API、MediaCodec Surface dmabuf 导入、Android/proot loopback、`mstsc` 兼容性和整机热表现必须在目标手机上验证；
+- 同时进行本地显示与远程编码需要额外 EGL fan-out，本方案为降低功耗采用互斥的本地/远程 consumer。
+
+## 上游资料
+
+- [niri 官方文档](https://niri-wm.github.io/niri/)
+- [Celvra/ANiri](https://github.com/Celvra/ANiri)
+- [superturtlee/anland](https://github.com/superturtlee/anland)
+- [Droidspaces-OSS](https://github.com/ravindu644/Droidspaces-OSS)
+
+## 许可证
+
+本仓库保留 niri/ANiri 上游许可证及各组件原有版权声明，详见 [`LICENSE`](LICENSE) 与源码文件头。修改和再分发时请同时遵守对应上游项目的许可条款。
