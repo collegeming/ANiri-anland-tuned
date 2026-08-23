@@ -37,9 +37,34 @@ use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
 /// How often we poll the consumer for input, buffer-ready and reconnects.
-/// Kept at 1 ms so buffer-ready (our "vblank") is picked up with minimal
-/// latency; the anland lockstep throughput is bound by this plus the render.
-const POLL_INTERVAL: Duration = Duration::from_millis(1);
+///
+/// The anland transport is lockstep and exposes no fds to the event loop, so we
+/// poll the consumer's buffer-ready eventfd and data socket on a timer. The
+/// buffer-ready signal fires at the *display refresh rate* (the consumer keeps
+/// cycling buffers even on a static desktop), so polling faster than ~half a
+/// frame only burns CPU waking a thread that finds nothing — 1 ms used to fire
+/// ~1000×/s while only ~60–120 of those polls actually found a buffer-ready.
+///
+/// We therefore sample at *half the frame period*, clamped to a safe window:
+///   - never slower than `MAX` (≈8 ms): a 60 Hz panel still gets ~2 samples per
+///     frame so a buffer-ready is never missed, and the lockstep pipeline only
+///     shifts by at most one frame;
+///   - never faster than `MIN` (≈2 ms): no point polling quicker than the
+///     consumer can produce frames, and 2 ms is already well below any panel's
+///     refresh.
+///
+/// On a 60 Hz panel this is ~8 ms (≈8× fewer wakeups than 1 ms, eliminating the
+/// ~880 wasted polls/sec that drove the idle heat), on 120 Hz ~4 ms (≈4× fewer).
+const POLL_INTERVAL_MIN: Duration = Duration::from_millis(2);
+const POLL_INTERVAL_MAX: Duration = Duration::from_millis(8);
+
+/// Poll interval used while the consumer is gone (app backgrounded, device
+/// locked, daemon down). In fallback there is no buffer-ready to pick up and no
+/// input to drain — the only thing the tick does is attempt a reconnect and
+/// flush clients. Retrying that at the active cadence (125–500×/s) just burns
+/// CPU for nothing, so back off to a slow reconnect probe. The active cadence
+/// resumes the instant `poll()` flips out of fallback on a successful reconnect.
+const FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long a new consumer buffer size must remain unchanged before it becomes
 /// the output mode. Android can briefly alternate portrait and landscape
@@ -276,7 +301,27 @@ impl Anland {
             warn!("anland: failed to start camera engine");
         }
 
-        let timer = Timer::from_duration(POLL_INTERVAL);
+        // Derive the poll interval from the actual display refresh: sample at
+        // half a frame period so a buffer-ready is never missed (2 samples/frame)
+        // while avoiding the 1 ms hot-loop wakeups that fired ~1000×/s.
+        let refresh_hz = self.screen_refresh as f64 / 1000.0;
+        let half_frame = if refresh_hz > 0.0 {
+            Duration::from_secs_f64(0.5 / refresh_hz)
+        } else {
+            POLL_INTERVAL_MAX
+        };
+        let poll_interval = if half_frame < POLL_INTERVAL_MIN {
+            POLL_INTERVAL_MIN
+        } else if half_frame > POLL_INTERVAL_MAX {
+            POLL_INTERVAL_MAX
+        } else {
+            half_frame
+        };
+        info!(
+            "anland: poll interval = {poll_interval:?} (refresh {refresh_hz:.0} Hz)"
+        );
+
+        let timer = Timer::from_duration(poll_interval);
         niri.event_loop
             .insert_source(timer, move |_, _, state| {
                 // Reconnect and buffer-ready handling.
@@ -288,7 +333,16 @@ impl Anland {
                 }
 
                 state.refresh_and_flush_clients();
-                TimeoutAction::ToDuration(POLL_INTERVAL)
+
+                // Back off while the consumer is gone so we don't hammer
+                // reconnect + client flush at the active cadence. poll() may
+                // have just reconnected, so re-check the *current* state.
+                let interval = if state.backend.anland().is_in_fallback() {
+                    FALLBACK_POLL_INTERVAL
+                } else {
+                    poll_interval
+                };
+                TimeoutAction::ToDuration(interval)
             })
             .expect("failed to insert anland poll timer");
     }
@@ -489,6 +543,13 @@ impl Anland {
         if self.buffer_ready() {
             self.on_buffer_ready(niri);
         }
+    }
+
+    /// Whether the consumer is currently gone (the daemon reported a fallback).
+    /// Drives the poll-timer back-off: while in fallback we retry the reconnect
+    /// slowly instead of hammering it at the active render cadence.
+    pub fn is_in_fallback(&self) -> bool {
+        !self.disposed && unsafe { ffi::is_fallback(self.ctx) }
     }
 
     /// Ask the client that owns the current clipboard selection for its text/plain
