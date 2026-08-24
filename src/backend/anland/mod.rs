@@ -915,7 +915,7 @@ impl Anland {
                 self.pending_size = None;
                 self.size_adapt_cooldown_until =
                     now_usec.saturating_add(duration_to_micros(SIZE_ADAPT_COOLDOWN));
-                self.adapt_to_size(niri, &output, buffer_size.0, buffer_size.1);
+                self.adapt_to_size(niri, output, buffer_size.0, buffer_size.1);
             }
         }
 
