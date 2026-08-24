@@ -185,13 +185,11 @@ jobs:
             echo "- Baseline graft: \`$BASELINE_COMMIT\`"
             echo "- Outcome: $msg"
             if [ -f /tmp/sync_outcome.txt ]; then
-              outcome=$(cat /tmp/sync_outcome.txt)
-              case "$outcome" in
+              case "$(cat /tmp/sync_outcome.txt)" in
                 PR_CREATE_BLOCKED)
                   echo "- PR auto-creation blocked by repo setting; open manually:"
-                  echo "  $COMPARE_URL" ;;
-                "PR created."|"PR "#* updated.")
-                  echo "- $outcome" ;;
+                  echo "  ${COMPARE_URL:-}" ;;
+                *) echo "- $(cat /tmp/sync_outcome.txt)" ;;
               esac
             fi
           } >> "$GITHUB_STEP_SUMMARY"
