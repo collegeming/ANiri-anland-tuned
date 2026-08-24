@@ -1,3 +1,4 @@
+# Publishes only pre-existing annotated tags after rebuilding and verification.
 name: ANiri ARM64 release
 
 on:
