@@ -23,7 +23,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  workflows: write  # conflict-PR head carries niri's own workflow files; needed to push.
 
 concurrency:
   group: aniri-upstream-sync
@@ -117,7 +116,15 @@ jobs:
         run: |
           set -euo pipefail
           BR="sync/niri-upstream-${UPSTREAM_SHORT}"
-          git branch -f "$BR" "upstream/$UPSTREAM_BRANCH"
+          # Start the PR head from upstream/main, but restore the fork's own
+          # workflow files so the push introduces no .github/workflows change
+          # (GITHUB_TOKEN cannot push workflow-file changes). The PR will still
+          # surface real conflicts on non-workflow files.
+          git checkout -B "$BR" "upstream/$UPSTREAM_BRANCH"
+          rm -rf .github/workflows
+          git checkout "$TARGET_BRANCH" -- .github/workflows
+          git add .github/workflows
+          git commit -m "chore(sync): keep fork workflow files" --no-verify >/dev/null
           git push --force origin "$BR"
           PR_BODY=$(cat <<EOF
           Automatic upstream sync from \`$UPSTREAM_REPO:$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`.
