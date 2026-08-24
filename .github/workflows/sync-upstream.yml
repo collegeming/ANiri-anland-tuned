@@ -23,6 +23,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  workflows: write  # conflict-PR head carries niri's own workflow files; needed to push.
 
 concurrency:
   group: aniri-upstream-sync
