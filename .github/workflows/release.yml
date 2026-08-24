@@ -5,7 +5,12 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing annotated tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,6 +23,7 @@ env:
   CARGO_TERM_COLOR: always
   DEBIAN_FRONTEND: noninteractive
   IMPLEMENTATION_COMMIT: 74ce2a92eb2151d729818a784ced605ec950b56c
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 jobs:
   verify-and-build:
@@ -30,15 +36,16 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
           show-progress: false
 
       - name: Verify annotated tag and release absence
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF_TYPE" = tag
+          test "$TAG" != "v0.2.0"
           test "$(git cat-file -t "refs/tags/$TAG")" = tag
           source_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
           test "$source_commit" = "$(git rev-parse HEAD)"
@@ -80,7 +87,7 @@ jobs:
       - name: Build native ARM64 release binary
         env:
           NIRI_BUILD_COMMIT: ${{ env.SOURCE_COMMIT }}
-          NIRI_BUILD_VERSION_STRING: ${{ github.ref_name }} (anland; ${{ env.SOURCE_COMMIT }})
+          NIRI_BUILD_VERSION_STRING: ${{ env.RELEASE_TAG }} (anland; ${{ env.SOURCE_COMMIT }})
         run: cargo build --frozen --release --bin niri
 
       - name: Generate CycloneDX SBOM
@@ -91,7 +98,7 @@ jobs:
 
       - name: Assemble and verify release assets
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
           WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
@@ -139,7 +146,7 @@ jobs:
       - name: Upload verified release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: aniri-arm64-release-${{ github.ref_name }}
+          name: aniri-arm64-release-${{ env.RELEASE_TAG }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -157,18 +164,19 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
           show-progress: false
 
       - name: Download verified assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: aniri-arm64-release-${{ github.ref_name }}
+          name: aniri-arm64-release-${{ env.RELEASE_TAG }}
           path: dist
 
       - name: Re-verify remote tag and publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           test "$(git cat-file -t "refs/tags/$TAG")" = tag
