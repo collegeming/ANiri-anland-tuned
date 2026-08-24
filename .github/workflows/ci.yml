@@ -16,35 +16,53 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  DEBIAN_FRONTEND: noninteractive
   IMPLEMENTATION_COMMIT: 74ce2a92eb2151d729818a784ced605ec950b56c
+  CLIPPY_SOURCE_COMMIT: 1999f7cfb9c7ffdd02d79edf35fdf98df7eafe18
+  ARCH_BASE_IMAGE: docker.io/ogarcia/archlinux:latest@sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
+  ARCH_BASE_INDEX_DIGEST: sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
+  ARCH_BASE_ARM64_MANIFEST_DIGEST: sha256:019992bf3dc54ab4ba1515dd80e613d473b2ca7a97e410e1da053ae501b6383d
+  ARCH_BASE_LAYER_DIGEST: sha256:c714810994102b031ad2f2319282528593ae84ce86b5131b82e859642e3c79f4
 
 jobs:
   verify-and-build:
-    name: Verify and build ARM64 candidate
+    name: Verify and build ARM64 candidate in Arch Linux
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 120
+    container:
+      image: docker.io/ogarcia/archlinux:latest@sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      - name: Check out candidate commit
+      - name: Install Arch build and Builder-equivalent runtime packages
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          grep -qxF 'Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist || \
+            sed -i '1i Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Su --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel binutils clang cmake curl file git github-cli jq pkgconf rustup \
+            dbus wayland wayland-protocols \
+            libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm \
+            libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb \
+            libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config \
+            pipewire libpipewire
+
+      - name: Check out candidate source
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           fetch-depth: 0
           show-progress: false
 
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            binutils clang curl file gcc libadwaita-1-dev libdbus-1-dev \
-            libdisplay-info-dev libegl1-mesa-dev libgbm-dev libinput-dev \
-            libpango1.0-dev libpipewire-0.3-dev libseat-dev libsystemd-dev \
-            libudev-dev libwayland-dev libxkbcommon-dev
-
       - name: Select Rust toolchain
         run: |
+          set -euo pipefail
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
+          printf '%s\n' "$HOME/.cargo/bin" >>"$GITHUB_PATH"
           rustc --version --verbose
           cargo --version --verbose
 
@@ -60,13 +78,14 @@ jobs:
       - name: Run strict Clippy
         run: cargo clippy --workspace --all-targets --exclude niri-visual-tests --locked -- -D warnings
 
-      - name: Build native ARM64 release binary
+      - name: Build native Arch ARM64 release binary
         env:
           NIRI_BUILD_COMMIT: ${{ github.sha }}
         run: cargo build --frozen --release --bin niri
 
       - name: Generate CycloneDX SBOM
         run: |
+          set -euo pipefail
           cargo install cargo-cyclonedx --version 0.5.9 --locked
           cargo cyclonedx --format json --override-filename ANiri-SBOM
           test -s ANiri-SBOM.json
@@ -74,6 +93,7 @@ jobs:
       - name: Assemble and verify candidate assets
         env:
           SOURCE_COMMIT: ${{ github.sha }}
+          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(uname -m)" = aarch64
@@ -81,12 +101,52 @@ jobs:
           install -Dm644 LICENSE dist/LICENSE
           install -Dm644 ANiri-SBOM.json dist/ANiri-SBOM.cdx.json
 
+          runtime_packages=(
+            libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm
+            libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb
+            libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config
+            pipewire libpipewire
+          )
+          build_packages=(
+            base-devel binutils clang cmake curl file git github-cli jq pkgconf
+            rustup dbus wayland wayland-protocols
+          )
+          pacman -Q "${runtime_packages[@]}" >dist/ARCH-RUNTIME-PACKAGES.txt
+          pacman -Q "${build_packages[@]}" >dist/ARCH-BUILD-PACKAGES.txt
+
           binary_version=$(dist/niri-arm64-linux-bin --version)
           elf_header=$(file dist/niri-arm64-linux-bin)
-          dependencies=$(ldd dist/niri-arm64-linux-bin)
+          interpreter=$(readelf -lW dist/niri-arm64-linux-bin | sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')
+          test "$interpreter" = /lib/ld-linux-aarch64.so.1
+          test -e "$interpreter"
           readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Class:[[:space:]]+ELF64'
           readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Machine:[[:space:]]+AArch64'
-          readelf -l dist/niri-arm64-linux-bin | grep -F 'Requesting program interpreter: /lib/ld-linux-aarch64.so.1'
+          readelf -dW dist/niri-arm64-linux-bin | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' >dist/ELF-NEEDED.txt
+          test -s dist/ELF-NEEDED.txt
+
+          : >dist/ELF-SONAME-RESOLUTION.txt
+          while IFS= read -r soname; do
+            resolved=$(ldconfig -p | awk -v soname="$soname" '$1 == soname { print $NF; exit }')
+            if [[ -z "$resolved" ]]; then
+              for candidate in "/usr/lib/$soname" "/lib/$soname"; do
+                if [[ -e "$candidate" ]]; then
+                  resolved=$candidate
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$resolved" || ! -e "$resolved" ]]; then
+              printf 'Unresolved direct ELF dependency: %s\n' "$soname" >&2
+              exit 1
+            fi
+            owner=$(pacman -Qo "$resolved" 2>/dev/null || true)
+            printf '%s\t%s\t%s\n' "$soname" "$(readlink -f "$resolved")" "$owner" >>dist/ELF-SONAME-RESOLUTION.txt
+          done <dist/ELF-NEEDED.txt
+
+          ldd dist/niri-arm64-linux-bin >dist/LDD.txt
+          if grep -F 'not found' dist/LDD.txt; then
+            exit 1
+          fi
 
           cat >dist/NOTICE.txt <<'NOTICE'
           ANiri is a downstream niri build for the Anland/Droidspaces integration.
@@ -99,27 +159,45 @@ jobs:
             printf 'SOURCE_REPOSITORY=%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
             printf 'SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
             printf 'IMPLEMENTATION_COMMIT=%s\n' "$IMPLEMENTATION_COMMIT"
-            printf 'WORKFLOW_COMMIT=%s\n' "$SOURCE_COMMIT"
+            printf 'CLIPPY_SOURCE_COMMIT=%s\n' "$CLIPPY_SOURCE_COMMIT"
+            printf 'WORKFLOW_COMMIT=%s\n' "$WORKFLOW_COMMIT"
             printf 'TAG=candidate\n'
+            printf 'TAG_OBJECT=none\n'
             printf 'TARGET=aarch64-unknown-linux-gnu\n'
+            printf 'BUILD_DISTRO=Arch Linux ARM64\n'
+            printf 'ARCH_BASE_IMAGE=%s\n' "$ARCH_BASE_IMAGE"
+            printf 'ARCH_BASE_INDEX_DIGEST=%s\n' "$ARCH_BASE_INDEX_DIGEST"
+            printf 'ARCH_BASE_ARM64_MANIFEST_DIGEST=%s\n' "$ARCH_BASE_ARM64_MANIFEST_DIGEST"
+            printf 'ARCH_BASE_LAYER_DIGEST=%s\n' "$ARCH_BASE_LAYER_DIGEST"
             printf 'RUNNER_ARCH=%s\n' "$RUNNER_ARCH"
+            printf 'UNAME_MACHINE=%s\n' "$(uname -m)"
             printf 'RUSTC=%s\n' "$(rustc --version)"
             printf 'CARGO=%s\n' "$(cargo --version)"
             printf 'BINARY_VERSION=%s\n' "$binary_version"
             printf 'ELF=%s\n' "$elf_header"
-            printf 'DYNAMIC_DEPENDENCIES_BEGIN\n%s\nDYNAMIC_DEPENDENCIES_END\n' "$dependencies"
+            printf 'INTERPRETER=%s\n' "$interpreter"
+            printf 'ARCH_RUNTIME_PACKAGES_BEGIN\n'; cat dist/ARCH-RUNTIME-PACKAGES.txt; printf 'ARCH_RUNTIME_PACKAGES_END\n'
+            printf 'ARCH_BUILD_PACKAGES_BEGIN\n'; cat dist/ARCH-BUILD-PACKAGES.txt; printf 'ARCH_BUILD_PACKAGES_END\n'
+            printf 'ELF_NEEDED_BEGIN\n'; cat dist/ELF-NEEDED.txt; printf 'ELF_NEEDED_END\n'
+            printf 'ELF_SONAME_RESOLUTION_BEGIN\n'; cat dist/ELF-SONAME-RESOLUTION.txt; printf 'ELF_SONAME_RESOLUTION_END\n'
+            printf 'DYNAMIC_DEPENDENCIES_BEGIN\n'; cat dist/LDD.txt; printf 'DYNAMIC_DEPENDENCIES_END\n'
           } >dist/BUILD-METADATA.txt
 
-          (cd dist && sha256sum niri-arm64-linux-bin ANiri-SBOM.cdx.json BUILD-METADATA.txt LICENSE NOTICE.txt >SHA256SUMS)
+          (cd dist && sha256sum \
+            niri-arm64-linux-bin ANiri-SBOM.cdx.json BUILD-METADATA.txt \
+            ARCH-RUNTIME-PACKAGES.txt ARCH-BUILD-PACKAGES.txt ELF-NEEDED.txt \
+            ELF-SONAME-RESOLUTION.txt LDD.txt LICENSE NOTICE.txt >SHA256SUMS)
           (cd dist && sha256sum --check SHA256SUMS)
           dist/niri-arm64-linux-bin --version
           file dist/niri-arm64-linux-bin
-          ldd dist/niri-arm64-linux-bin
+          cat dist/ELF-NEEDED.txt
+          cat dist/ELF-SONAME-RESOLUTION.txt
+          cat dist/LDD.txt
 
       - name: Upload candidate assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: aniri-arm64-candidate-${{ github.sha }}
+          name: aniri-arm64-arch-candidate-${{ github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
