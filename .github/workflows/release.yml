@@ -5,6 +5,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -91,6 +92,7 @@ jobs:
       - name: Assemble and verify release assets
         env:
           TAG: ${{ github.ref_name }}
+          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(uname -m)" = aarch64
@@ -116,7 +118,7 @@ jobs:
             printf 'SOURCE_REPOSITORY=%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
             printf 'SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
             printf 'IMPLEMENTATION_COMMIT=%s\n' "$IMPLEMENTATION_COMMIT"
-            printf 'WORKFLOW_COMMIT=%s\n' "$SOURCE_COMMIT"
+            printf 'WORKFLOW_COMMIT=%s\n' "$WORKFLOW_COMMIT"
             printf 'TAG=%s\n' "$TAG"
             printf 'TAG_OBJECT=%s\n' "$TAG_OBJECT"
             printf 'TARGET=aarch64-unknown-linux-gnu\n'
