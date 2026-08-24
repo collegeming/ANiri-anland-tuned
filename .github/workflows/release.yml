@@ -2,9 +2,6 @@
 name: ANiri ARM64 release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -333,7 +330,7 @@ jobs:
           pacman -Sy --noconfirm archlinux-keyring
           pacman -Su --noconfirm
           pacman -S --noconfirm --needed \
-            binutils curl file github-cli jq \
+            binutils curl diffutils file github-cli jq \
             libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm \
             libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb \
             libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config \
