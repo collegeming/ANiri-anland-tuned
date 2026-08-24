@@ -1,0 +1,172 @@
+# Reconstructs a shared ancestor with niri-wm/niri and rebases
+# anland-poll-optimize onto niri-wm/niri:main daily.
+#
+# Why the graft: anland-poll-optimize is an orphan branch whose root commit
+# 1a33594 ("feat: anland backend") dropped the full niri tree as a single
+# commit, so it has no git-level common ancestor with niri-wm/niri. That root
+# was derived from niri-wm/niri v26.04 (commit 8ed0da44, confirmed by the
+# workspace version 26.4.0 in Cargo.toml). We graft v26.04 as the orphan
+# root's parent at runtime so `git rebase upstream/main` has a real merge-base
+# to work from. After the first clean rebase is pushed, the branch gains real
+# niri ancestry and the graft step becomes a no-op (self-healing).
+#
+# - Clean rebase: push --force-with-lease to anland-poll-optimize.
+# - Conflicts: open a PR (base=anland-poll-optimize, head=upstream snapshot)
+#   and @mention the owner for manual resolution.
+name: ANiri upstream sync
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # 06:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: aniri-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: niri-wm/niri
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: anland-poll-optimize
+  # Orphan root of anland-poll-optimize (parentless), derived from niri v26.04.
+  ORPHAN_ROOT: 1a33594f42efef6415096de504214269d82c247d
+  # niri-wm/niri v26.04 commit, the baseline the orphan root was built on.
+  BASELINE_COMMIT: 8ed0da44d974c32c6877d2f4630c314da0717ecb
+
+jobs:
+  sync:
+    name: Graft baseline and rebase onto niri-wm/niri main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout target branch (full history)
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          show-progress: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream (full history; includes BASELINE_COMMIT)
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          echo "UPSTREAM_SHA=$(git rev-parse "upstream/$UPSTREAM_BRANCH")" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHORT=$(git rev-parse --short=12 "upstream/$UPSTREAM_BRANCH")" >> "$GITHUB_ENV"
+          echo "TARGET_SHA=$(git rev-parse "$TARGET_BRANCH")" >> "$GITHUB_ENV"
+
+      - name: Graft baseline as orphan root parent
+        run: |
+          set -euo pipefail
+          # Only graft while the orphan root is still the branch root and
+          # remains parentless. After the first clean rebase+push the root is
+          # rewritten away and this step skips itself.
+          if [ "$(git cat-file -t "$ORPHAN_ROOT" 2>/dev/null || true)" = commit ] && \
+             [ -z "$(git rev-list --parents -n 1 "$ORPHAN_ROOT" | cut -d' ' -f2-)" ]; then
+            git replace --graft "$ORPHAN_ROOT" "$BASELINE_COMMIT"
+            echo "Grafted $ORPHAN_ROOT -> parent $BASELINE_COMMIT"
+          else
+            echo "Orphan root absent or already parented; skipping graft."
+          fi
+
+      - name: Check if upstream is already contained
+        id: need
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" "$TARGET_BRANCH"; then
+            echo "result=none" >> "$GITHUB_OUTPUT"
+            echo "Already in sync with $UPSTREAM_REPO@$UPSTREAM_SHORT."
+          else
+            echo "result=sync" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attempt clean rebase
+        id: rebase
+        if: steps.need.outputs.result == 'sync'
+        run: |
+          set -euo pipefail
+          if git rebase "upstream/$UPSTREAM_BRANCH"; then
+            echo "outcome=clean" >> "$GITHUB_OUTPUT"
+          else
+            git rebase --abort
+            echo "outcome=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push (clean rebase)
+        if: steps.rebase.outputs.outcome == 'clean'
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "$TARGET_BRANCH"
+          echo "::notice::Rebased $TARGET_BRANCH onto $UPSTREAM_REPO@$UPSTREAM_SHORT and pushed."
+
+      - name: Open conflict-resolution PR
+        if: steps.rebase.outputs.outcome == 'conflict'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BR="sync/niri-upstream-${UPSTREAM_SHORT}"
+          git branch -f "$BR" "upstream/$UPSTREAM_BRANCH"
+          git push --force origin "$BR"
+          PR_BODY=$(cat <<EOF
+          Automatic upstream sync from \`$UPSTREAM_REPO:$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`.
+
+          A clean rebase of \`$TARGET_BRANCH\` onto upstream failed with conflicts and needs manual resolution. The orphan history now shares the v26.04 baseline (\`$BASELINE_COMMIT\`) via a runtime graft, so resolving once should make future syncs clean.
+
+          - Upstream HEAD: $UPSTREAM_SHA
+          - Target HEAD (before sync): $TARGET_SHA
+
+          Resolve locally:
+          \`\`\`bash
+          git remote add upstream https://github.com/$UPSTREAM_REPO.git
+          git fetch upstream $UPSTREAM_BRANCH
+          git checkout $TARGET_BRANCH
+          git replace --graft $ORPHAN_ROOT $BASELINE_COMMIT
+          git rebase upstream/$UPSTREAM_BRANCH
+          # resolve conflicts, then:
+          git push --force-with-lease origin $TARGET_BRANCH
+          \`\`\`
+          cc @${{ github.repository_owner }}
+          EOF
+          )
+          existing=$(gh pr list --base "$TARGET_BRANCH" --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            gh pr comment "$existing" --body "Re-ran sync; conflicts still present upstream @ \`$UPSTREAM_SHORT\`."
+          else
+            gh pr create --base "$TARGET_BRANCH" --head "$BR" \
+              --title "sync: rebase $TARGET_BRANCH onto $UPSTREAM_REPO@$UPSTREAM_SHORT (conflicts)" \
+              --body "$PR_BODY"
+          fi
+          echo "::warning::Upstream sync produced conflicts; PR $BR -> $TARGET_BRANCH needs manual resolution."
+
+      - name: Summary
+        if: always()
+        run: |
+          r="${{ steps.need.outputs.result }}"
+          o="${{ steps.rebase.outputs.outcome }}"
+          case "$r" in
+            none) msg="already in sync" ;;
+            sync) case "$o" in
+                    clean)    msg="rebased & pushed" ;;
+                    conflict) msg="conflicts -> PR opened" ;;
+                    *)        msg="rebase did not run" ;;
+                  esac ;;
+            *) msg="n/a" ;;
+          esac
+          {
+            echo "### Upstream sync summary"
+            echo ""
+            echo "- Upstream: \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`"
+            echo "- Baseline graft: \`$BASELINE_COMMIT\`"
+            echo "- Outcome: $msg"
+          } >> "$GITHUB_STEP_SUMMARY"
