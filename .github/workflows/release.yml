@@ -16,22 +16,47 @@ permissions:
   contents: read
 
 concurrency:
-  group: aniri-arm64-release-${{ github.ref }}
+  group: aniri-arm64-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
-  DEBIAN_FRONTEND: noninteractive
   IMPLEMENTATION_COMMIT: 74ce2a92eb2151d729818a784ced605ec950b56c
+  CLIPPY_SOURCE_COMMIT: 1999f7cfb9c7ffdd02d79edf35fdf98df7eafe18
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  ARCH_BASE_IMAGE: docker.io/ogarcia/archlinux:latest@sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
+  ARCH_BASE_INDEX_DIGEST: sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
+  ARCH_BASE_ARM64_MANIFEST_DIGEST: sha256:019992bf3dc54ab4ba1515dd80e613d473b2ca7a97e410e1da053ae501b6383d
+  ARCH_BASE_LAYER_DIGEST: sha256:c714810994102b031ad2f2319282528593ae84ce86b5131b82e859642e3c79f4
 
 jobs:
   verify-and-build:
-    name: Verify tag and build ARM64 release
+    name: Verify tag and build ARM64 release in Arch Linux
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 90
+    timeout-minutes: 120
+    container:
+      image: docker.io/ogarcia/archlinux:latest@sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
+    defaults:
+      run:
+        shell: bash
 
     steps:
+      - name: Install Arch build and Builder-equivalent runtime packages
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          grep -qxF 'Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist || \
+            sed -i '1i Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Su --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel binutils clang cmake curl file git github-cli jq pkgconf rustup \
+            dbus wayland wayland-protocols \
+            libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm \
+            libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb \
+            libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config \
+            pipewire libpipewire
+
       - name: Check out tagged source
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
@@ -43,12 +68,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ env.RELEASE_TAG }}
+          WORKFLOW_DEFINITION_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
-          test "$TAG" != "v0.2.0"
+          [[ "$TAG" =~ ^v26\.4\.0-anland\.[0-9]+$ ]]
+          test "$TAG" != v26.4.0-anland.1
           test "$(git cat-file -t "refs/tags/$TAG")" = tag
           source_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
           test "$source_commit" = "$(git rev-parse HEAD)"
+          test "$source_commit" = "$WORKFLOW_DEFINITION_COMMIT"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists; refusing to overwrite it." >&2
             exit 1
@@ -56,19 +84,12 @@ jobs:
           printf 'SOURCE_COMMIT=%s\n' "$source_commit" >>"$GITHUB_ENV"
           printf 'TAG_OBJECT=%s\n' "$(git rev-parse "refs/tags/$TAG")" >>"$GITHUB_ENV"
 
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            binutils clang curl file gcc libadwaita-1-dev libdbus-1-dev \
-            libdisplay-info-dev libegl1-mesa-dev libgbm-dev libinput-dev \
-            libpango1.0-dev libpipewire-0.3-dev libseat-dev libsystemd-dev \
-            libudev-dev libwayland-dev libxkbcommon-dev
-
       - name: Select Rust toolchain
         run: |
+          set -euo pipefail
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
+          printf '%s\n' "$HOME/.cargo/bin" >>"$GITHUB_PATH"
           rustc --version --verbose
           cargo --version --verbose
 
@@ -84,7 +105,7 @@ jobs:
       - name: Run strict Clippy
         run: cargo clippy --workspace --all-targets --exclude niri-visual-tests --locked -- -D warnings
 
-      - name: Build native ARM64 release binary
+      - name: Build native Arch ARM64 release binary
         env:
           NIRI_BUILD_COMMIT: ${{ env.SOURCE_COMMIT }}
           NIRI_BUILD_VERSION_STRING: ${{ env.RELEASE_TAG }} (anland; ${{ env.SOURCE_COMMIT }})
@@ -92,6 +113,7 @@ jobs:
 
       - name: Generate CycloneDX SBOM
         run: |
+          set -euo pipefail
           cargo install cargo-cyclonedx --version 0.5.9 --locked
           cargo cyclonedx --format json --override-filename ANiri-SBOM
           test -s ANiri-SBOM.json
@@ -107,12 +129,52 @@ jobs:
           install -Dm644 LICENSE dist/LICENSE
           install -Dm644 ANiri-SBOM.json dist/ANiri-SBOM.cdx.json
 
+          runtime_packages=(
+            libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm
+            libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb
+            libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config
+            pipewire libpipewire
+          )
+          build_packages=(
+            base-devel binutils clang cmake curl file git github-cli jq pkgconf
+            rustup dbus wayland wayland-protocols
+          )
+          pacman -Q "${runtime_packages[@]}" >dist/ARCH-RUNTIME-PACKAGES.txt
+          pacman -Q "${build_packages[@]}" >dist/ARCH-BUILD-PACKAGES.txt
+
           binary_version=$(dist/niri-arm64-linux-bin --version)
           elf_header=$(file dist/niri-arm64-linux-bin)
-          dependencies=$(ldd dist/niri-arm64-linux-bin)
+          interpreter=$(readelf -lW dist/niri-arm64-linux-bin | sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')
+          test "$interpreter" = /lib/ld-linux-aarch64.so.1
+          test -e "$interpreter"
           readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Class:[[:space:]]+ELF64'
           readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Machine:[[:space:]]+AArch64'
-          readelf -l dist/niri-arm64-linux-bin | grep -F 'Requesting program interpreter: /lib/ld-linux-aarch64.so.1'
+          readelf -dW dist/niri-arm64-linux-bin | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' >dist/ELF-NEEDED.txt
+          test -s dist/ELF-NEEDED.txt
+
+          : >dist/ELF-SONAME-RESOLUTION.txt
+          while IFS= read -r soname; do
+            resolved=$(ldconfig -p | awk -v soname="$soname" '$1 == soname { print $NF; exit }')
+            if [[ -z "$resolved" ]]; then
+              for candidate in "/usr/lib/$soname" "/lib/$soname"; do
+                if [[ -e "$candidate" ]]; then
+                  resolved=$candidate
+                  break
+                fi
+              done
+            fi
+            if [[ -z "$resolved" || ! -e "$resolved" ]]; then
+              printf 'Unresolved direct ELF dependency: %s\n' "$soname" >&2
+              exit 1
+            fi
+            owner=$(pacman -Qo "$resolved" 2>/dev/null || true)
+            printf '%s\t%s\t%s\n' "$soname" "$(readlink -f "$resolved")" "$owner" >>dist/ELF-SONAME-RESOLUTION.txt
+          done <dist/ELF-NEEDED.txt
+
+          ldd dist/niri-arm64-linux-bin >dist/LDD.txt
+          if grep -F 'not found' dist/LDD.txt; then
+            exit 1
+          fi
 
           cat >dist/NOTICE.txt <<'NOTICE'
           ANiri is a downstream niri build for the Anland/Droidspaces integration.
@@ -125,28 +187,45 @@ jobs:
             printf 'SOURCE_REPOSITORY=%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
             printf 'SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
             printf 'IMPLEMENTATION_COMMIT=%s\n' "$IMPLEMENTATION_COMMIT"
+            printf 'CLIPPY_SOURCE_COMMIT=%s\n' "$CLIPPY_SOURCE_COMMIT"
             printf 'WORKFLOW_COMMIT=%s\n' "$WORKFLOW_COMMIT"
             printf 'TAG=%s\n' "$TAG"
             printf 'TAG_OBJECT=%s\n' "$TAG_OBJECT"
             printf 'TARGET=aarch64-unknown-linux-gnu\n'
+            printf 'BUILD_DISTRO=Arch Linux ARM64\n'
+            printf 'ARCH_BASE_IMAGE=%s\n' "$ARCH_BASE_IMAGE"
+            printf 'ARCH_BASE_INDEX_DIGEST=%s\n' "$ARCH_BASE_INDEX_DIGEST"
+            printf 'ARCH_BASE_ARM64_MANIFEST_DIGEST=%s\n' "$ARCH_BASE_ARM64_MANIFEST_DIGEST"
+            printf 'ARCH_BASE_LAYER_DIGEST=%s\n' "$ARCH_BASE_LAYER_DIGEST"
             printf 'RUNNER_ARCH=%s\n' "$RUNNER_ARCH"
+            printf 'UNAME_MACHINE=%s\n' "$(uname -m)"
             printf 'RUSTC=%s\n' "$(rustc --version)"
             printf 'CARGO=%s\n' "$(cargo --version)"
             printf 'BINARY_VERSION=%s\n' "$binary_version"
             printf 'ELF=%s\n' "$elf_header"
-            printf 'DYNAMIC_DEPENDENCIES_BEGIN\n%s\nDYNAMIC_DEPENDENCIES_END\n' "$dependencies"
+            printf 'INTERPRETER=%s\n' "$interpreter"
+            printf 'ARCH_RUNTIME_PACKAGES_BEGIN\n'; cat dist/ARCH-RUNTIME-PACKAGES.txt; printf 'ARCH_RUNTIME_PACKAGES_END\n'
+            printf 'ARCH_BUILD_PACKAGES_BEGIN\n'; cat dist/ARCH-BUILD-PACKAGES.txt; printf 'ARCH_BUILD_PACKAGES_END\n'
+            printf 'ELF_NEEDED_BEGIN\n'; cat dist/ELF-NEEDED.txt; printf 'ELF_NEEDED_END\n'
+            printf 'ELF_SONAME_RESOLUTION_BEGIN\n'; cat dist/ELF-SONAME-RESOLUTION.txt; printf 'ELF_SONAME_RESOLUTION_END\n'
+            printf 'DYNAMIC_DEPENDENCIES_BEGIN\n'; cat dist/LDD.txt; printf 'DYNAMIC_DEPENDENCIES_END\n'
           } >dist/BUILD-METADATA.txt
 
-          (cd dist && sha256sum niri-arm64-linux-bin ANiri-SBOM.cdx.json BUILD-METADATA.txt LICENSE NOTICE.txt >SHA256SUMS)
+          (cd dist && sha256sum \
+            niri-arm64-linux-bin ANiri-SBOM.cdx.json BUILD-METADATA.txt \
+            ARCH-RUNTIME-PACKAGES.txt ARCH-BUILD-PACKAGES.txt ELF-NEEDED.txt \
+            ELF-SONAME-RESOLUTION.txt LDD.txt LICENSE NOTICE.txt >SHA256SUMS)
           (cd dist && sha256sum --check SHA256SUMS)
           dist/niri-arm64-linux-bin --version
           file dist/niri-arm64-linux-bin
-          ldd dist/niri-arm64-linux-bin
+          cat dist/ELF-NEEDED.txt
+          cat dist/ELF-SONAME-RESOLUTION.txt
+          cat dist/LDD.txt
 
       - name: Upload verified release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: aniri-arm64-release-${{ env.RELEASE_TAG }}
+          name: aniri-arm64-arch-release-${{ env.RELEASE_TAG }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -170,7 +249,7 @@ jobs:
       - name: Download verified assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: aniri-arm64-release-${{ env.RELEASE_TAG }}
+          name: aniri-arm64-arch-release-${{ env.RELEASE_TAG }}
           path: dist
 
       - name: Re-verify remote tag and publish release
@@ -185,8 +264,11 @@ jobs:
           test "$remote_tag_object" = "$(git rev-parse "refs/tags/$TAG")"
           source_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
           grep -Fx "SOURCE_COMMIT=$source_commit" dist/BUILD-METADATA.txt
+          grep -Fx "WORKFLOW_COMMIT=$source_commit" dist/BUILD-METADATA.txt
           grep -Fx "TAG=$TAG" dist/BUILD-METADATA.txt
           grep -Fx "TAG_OBJECT=$remote_tag_object" dist/BUILD-METADATA.txt
+          grep -Fx 'BUILD_DISTRO=Arch Linux ARM64' dist/BUILD-METADATA.txt
+          grep -Fx "ARCH_BASE_IMAGE=$ARCH_BASE_IMAGE" dist/BUILD-METADATA.txt
           (cd dist && sha256sum --check SHA256SUMS)
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -195,16 +277,18 @@ jobs:
           fi
 
           cat >release-notes.txt <<EOF
-          Native ARM64 ANiri release for Anland/Droidspaces.
+          Native Arch Linux ARM64 ANiri release for Anland/Droidspaces.
 
           - Tag: $TAG (annotated object $remote_tag_object)
           - Source/workflow commit: $source_commit
-          - Polling/clipboard implementation commit: $IMPLEMENTATION_COMMIT
-          - Target: aarch64-unknown-linux-gnu on a native GitHub-hosted ARM64 runner
-          - Verification: formatting, check, tests, strict Clippy, release build, ELF/dependency/version checks
+          - Polling/clipboard implementation baseline: $IMPLEMENTATION_COMMIT
+          - Strict-Clippy source baseline: $CLIPPY_SOURCE_COMMIT
+          - Build distro: Arch Linux ARM64 in pinned base $ARCH_BASE_IMAGE
+          - Verification: formatting, check, tests, strict Clippy, release build, version, ELF interpreter, every direct NEEDED SONAME, and ldd without not-found entries
           - License: GPL-3.0-or-later
 
-          Build details and dynamic dependencies are recorded in BUILD-METADATA.txt.
+          Build/runtime package versions, direct SONAME ownership, and full dynamic
+          dependency resolution are recorded in BUILD-METADATA.txt and companion files.
           Third-party dependency and license data are recorded in ANiri-SBOM.cdx.json.
           EOF
 
@@ -212,5 +296,97 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --latest=false \
-            --title "ANiri $TAG for Anland (ARM64)" \
+            --title "ANiri $TAG for Anland (Arch Linux ARM64)" \
             --notes-file release-notes.txt
+
+  verify-public-release:
+    name: Re-download and verify public Arch ARM64 release
+    needs: publish
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    container:
+      image: docker.io/ogarcia/archlinux:latest@sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Install Arch runtime and verification packages
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          grep -qxF 'Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist || \
+            sed -i '1i Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Su --noconfirm
+          pacman -S --noconfirm --needed \
+            binutils curl file github-cli jq \
+            libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm \
+            libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb \
+            libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config \
+            pipewire libpipewire
+
+      - name: Download and independently verify public assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          install -d public-release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir public-release
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" >release-api.json
+
+          cat >expected-assets.txt <<'ASSETS'
+          ANiri-SBOM.cdx.json
+          ARCH-BUILD-PACKAGES.txt
+          ARCH-RUNTIME-PACKAGES.txt
+          BUILD-METADATA.txt
+          ELF-NEEDED.txt
+          ELF-SONAME-RESOLUTION.txt
+          LDD.txt
+          LICENSE
+          NOTICE.txt
+          SHA256SUMS
+          niri-arm64-linux-bin
+          ASSETS
+          jq -r '.assets[].name' release-api.json | sort >api-assets.txt
+          sort -o expected-assets.txt expected-assets.txt
+          diff -u expected-assets.txt api-assets.txt
+
+          while IFS= read -r asset; do
+            actual=$(sha256sum "public-release/$asset" | cut -d' ' -f1)
+            api_digest=$(jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest' release-api.json)
+            test "$api_digest" = "sha256:$actual"
+            printf '%s  %s\n' "$actual" "$asset"
+          done <expected-assets.txt
+          (cd public-release && sha256sum --check SHA256SUMS)
+
+          binary=public-release/niri-arm64-linux-bin
+          test "$(uname -m)" = aarch64
+          readelf -h "$binary" | grep -Eq 'Class:[[:space:]]+ELF64'
+          readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
+          interpreter=$(readelf -lW "$binary" | sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')
+          test "$interpreter" = /lib/ld-linux-aarch64.so.1
+          test -e "$interpreter"
+          readelf -dW "$binary" | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' >public-needed.txt
+          diff -u public-release/ELF-NEEDED.txt public-needed.txt
+          while IFS= read -r soname; do
+            resolved=$(ldconfig -p | awk -v soname="$soname" '$1 == soname { print $NF; exit }')
+            if [[ -z "$resolved" ]]; then
+              for candidate in "/usr/lib/$soname" "/lib/$soname"; do
+                if [[ -e "$candidate" ]]; then resolved=$candidate; break; fi
+              done
+            fi
+            test -n "$resolved"
+            test -e "$resolved"
+          done <public-needed.txt
+          ldd "$binary" >public-ldd.txt
+          if grep -F 'not found' public-ldd.txt; then exit 1; fi
+          binary_version=$("$binary" --version)
+          grep -Fx "BINARY_VERSION=$binary_version" public-release/BUILD-METADATA.txt
+          grep -Fx 'BUILD_DISTRO=Arch Linux ARM64' public-release/BUILD-METADATA.txt
+          grep -Fx "ARCH_BASE_IMAGE=$ARCH_BASE_IMAGE" public-release/BUILD-METADATA.txt
+          file "$binary"
+          cat public-needed.txt
+          cat public-ldd.txt
+          printf '%s\n' "$binary_version"
