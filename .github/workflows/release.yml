@@ -372,6 +372,8 @@ jobs:
           (cd public-release && sha256sum --check SHA256SUMS)
 
           binary=public-release/niri-arm64-linux-bin
+          chmod 0755 "$binary"
+          test -x "$binary"
           test "$(uname -m)" = aarch64
           readelf -h "$binary" | grep -Eq 'Class:[[:space:]]+ELF64'
           readelf -h "$binary" | grep -Eq 'Machine:[[:space:]]+AArch64'
