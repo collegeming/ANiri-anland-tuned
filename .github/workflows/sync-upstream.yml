@@ -147,15 +147,22 @@ jobs:
           cc @${{ github.repository_owner }}
           EOF
           )
+          COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${TARGET_BRANCH}...${BR}"
           existing=$(gh pr list --base "$TARGET_BRANCH" --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$existing" ]; then
-            gh pr comment "$existing" --body "Re-ran sync; conflicts still present upstream @ \`$UPSTREAM_SHORT\`."
-          else
-            gh pr create --base "$TARGET_BRANCH" --head "$BR" \
+            gh pr comment "$existing" --body "Re-ran sync; conflicts still present upstream @ \`$UPSTREAM_SHORT\`." || true
+            echo "PR #$existing updated." >> /tmp/sync_outcome.txt
+          elif gh pr create --base "$TARGET_BRANCH" --head "$BR" \
               --title "sync: rebase $TARGET_BRANCH onto $UPSTREAM_REPO@$UPSTREAM_SHORT (conflicts)" \
-              --body "$PR_BODY"
+              --body "$PR_BODY" ; then
+            echo "PR created." >> /tmp/sync_outcome.txt
+          else
+            # PR creation is gated by the repo setting "Allow GitHub Actions to
+            # create and approve pull requests"; fall back to the compare URL.
+            echo "PR_CREATE_BLOCKED" >> /tmp/sync_outcome.txt
           fi
-          echo "::warning::Upstream sync produced conflicts; PR $BR -> $TARGET_BRANCH needs manual resolution."
+          echo "COMPARE_URL=$COMPARE_URL" >> "$GITHUB_ENV"
+          echo "::warning::Upstream sync produced conflicts; resolve via $COMPARE_URL"
 
       - name: Summary
         if: always()
@@ -166,7 +173,7 @@ jobs:
             none) msg="already in sync" ;;
             sync) case "$o" in
                     clean)    msg="rebased & pushed" ;;
-                    conflict) msg="conflicts -> PR opened" ;;
+                    conflict) msg="conflicts -> needs manual resolution" ;;
                     *)        msg="rebase did not run" ;;
                   esac ;;
             *) msg="n/a" ;;
@@ -177,4 +184,14 @@ jobs:
             echo "- Upstream: \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`"
             echo "- Baseline graft: \`$BASELINE_COMMIT\`"
             echo "- Outcome: $msg"
+            if [ -f /tmp/sync_outcome.txt ]; then
+              outcome=$(cat /tmp/sync_outcome.txt)
+              case "$outcome" in
+                PR_CREATE_BLOCKED)
+                  echo "- PR auto-creation blocked by repo setting; open manually:"
+                  echo "  $COMPARE_URL" ;;
+                "PR created."|"PR "#* updated.")
+                  echo "- $outcome" ;;
+              esac
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
