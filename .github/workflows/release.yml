@@ -1,85 +1,205 @@
-name: Prepare release
+name: ANiri ARM64 release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Public version'
-        required: true
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
+  group: aniri-arm64-release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-  RUN_SLOW_TESTS: 1
+  CARGO_TERM_COLOR: always
+  DEBIAN_FRONTEND: noninteractive
+  IMPLEMENTATION_COMMIT: 74ce2a92eb2151d729818a784ced605ec950b56c
 
 jobs:
-  check-release:
+  verify-and-build:
+    name: Verify tag and build ARM64 release
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Verify annotated tag and release absence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag
+          source_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+          test "$source_commit" = "$(git rev-parse HEAD)"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          printf 'SOURCE_COMMIT=%s\n' "$source_commit" >>"$GITHUB_ENV"
+          printf 'TAG_OBJECT=%s\n' "$(git rev-parse "refs/tags/$TAG")" >>"$GITHUB_ENV"
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            binutils clang curl file gcc libadwaita-1-dev libdbus-1-dev \
+            libdisplay-info-dev libegl1-mesa-dev libgbm-dev libinput-dev \
+            libpango1.0-dev libpipewire-0.3-dev libseat-dev libsystemd-dev \
+            libudev-dev libwayland-dev libxkbcommon-dev
+
+      - name: Select Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --exclude niri-visual-tests --locked
+
+      - name: Run tests
+        run: cargo test --workspace --exclude niri-visual-tests --locked -- --nocapture
+
+      - name: Run strict Clippy
+        run: cargo clippy --workspace --all-targets --exclude niri-visual-tests --locked -- -D warnings
+
+      - name: Build native ARM64 release binary
+        env:
+          NIRI_BUILD_COMMIT: ${{ env.SOURCE_COMMIT }}
+          NIRI_BUILD_VERSION_STRING: ${{ github.ref_name }} (anland; ${{ env.SOURCE_COMMIT }})
+        run: cargo build --frozen --release --bin niri
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --override-filename ANiri-SBOM
+          test -s ANiri-SBOM.json
+
+      - name: Assemble and verify release assets
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          install -Dm755 target/release/niri dist/niri-arm64-linux-bin
+          install -Dm644 LICENSE dist/LICENSE
+          install -Dm644 ANiri-SBOM.json dist/ANiri-SBOM.cdx.json
+
+          binary_version=$(dist/niri-arm64-linux-bin --version)
+          elf_header=$(file dist/niri-arm64-linux-bin)
+          dependencies=$(ldd dist/niri-arm64-linux-bin)
+          readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Class:[[:space:]]+ELF64'
+          readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Machine:[[:space:]]+AArch64'
+          readelf -l dist/niri-arm64-linux-bin | grep -F 'Requesting program interpreter: /lib/ld-linux-aarch64.so.1'
+
+          cat >dist/NOTICE.txt <<'NOTICE'
+          ANiri is a downstream niri build for the Anland/Droidspaces integration.
+          The project is licensed under GPL-3.0-or-later; see the accompanying LICENSE.
+          Third-party Rust package names, versions, licenses, and dependency relationships
+          are recorded in ANiri-SBOM.cdx.json.
+          NOTICE
+
+          {
+            printf 'SOURCE_REPOSITORY=%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            printf 'SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
+            printf 'IMPLEMENTATION_COMMIT=%s\n' "$IMPLEMENTATION_COMMIT"
+            printf 'WORKFLOW_COMMIT=%s\n' "$SOURCE_COMMIT"
+            printf 'TAG=%s\n' "$TAG"
+            printf 'TAG_OBJECT=%s\n' "$TAG_OBJECT"
+            printf 'TARGET=aarch64-unknown-linux-gnu\n'
+            printf 'RUNNER_ARCH=%s\n' "$RUNNER_ARCH"
+            printf 'RUSTC=%s\n' "$(rustc --version)"
+            printf 'CARGO=%s\n' "$(cargo --version)"
+            printf 'BINARY_VERSION=%s\n' "$binary_version"
+            printf 'ELF=%s\n' "$elf_header"
+            printf 'DYNAMIC_DEPENDENCIES_BEGIN\n%s\nDYNAMIC_DEPENDENCIES_END\n' "$dependencies"
+          } >dist/BUILD-METADATA.txt
+
+          (cd dist && sha256sum niri-arm64-linux-bin ANiri-SBOM.cdx.json BUILD-METADATA.txt LICENSE NOTICE.txt >SHA256SUMS)
+          (cd dist && sha256sum --check SHA256SUMS)
+          dist/niri-arm64-linux-bin --version
+          file dist/niri-arm64-linux-bin
+          ldd dist/niri-arm64-linux-bin
+
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aniri-arm64-release-${{ github.ref_name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish immutable-tag assets
+    needs: verify-and-build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Check out tagged source for final tag verification
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
+          fetch-depth: 0
           show-progress: false
 
-      - name: Check for unreplaced "Since:" in the wiki
-        run: |
-          # Fail if a match is found (exit code 0)
-          grep --recursive 'Since: next release' docs/wiki && exit 1
-
-          # Fail if grep failed (exit code 2)
-          status=$?
-          if [ $status -ne 1 ]; then exit $status; fi
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl gcc clang libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpipewire-0.3-dev libpango1.0-dev libdisplay-info-dev libadwaita-1-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Create vendored dependencies archive
-        run: |
-          mkdir .cargo
-          cargo vendor --locked > .cargo/config.toml
-          tar cJf niri-${{ github.event.inputs.version }}-vendored-dependencies.tar.xz vendor/
-
-  build-release:
-    needs: check-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            name: x86_64
-          - target: aarch64-unknown-linux-gnu
-            name: arm64
-
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v6
+      - name: Download verified assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          show-progress: false
+          name: aniri-arm64-release-${{ github.ref_name }}
+          path: dist
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Re-verify remote tag and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag
+          remote_tag_object=$(git ls-remote --tags origin "refs/tags/$TAG" | cut -f1)
+          test -n "$remote_tag_object"
+          test "$remote_tag_object" = "$(git rev-parse "refs/tags/$TAG")"
+          source_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+          grep -Fx "SOURCE_COMMIT=$source_commit" dist/BUILD-METADATA.txt
+          grep -Fx "TAG=$TAG" dist/BUILD-METADATA.txt
+          grep -Fx "TAG_OBJECT=$remote_tag_object" dist/BUILD-METADATA.txt
+          (cd dist && sha256sum --check SHA256SUMS)
 
-      - name: Install cross
-        run: cargo install cross
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
 
-      - name: Build
-        run: cross build --all --frozen --release --target ${{ matrix.target }}
+          cat >release-notes.txt <<EOF
+          Native ARM64 ANiri release for Anland/Droidspaces.
 
-      - name: Draft release
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          tag_name: v${{ github.event.inputs.version }}
-          fail_on_unmatched_files: false
+          - Tag: $TAG (annotated object $remote_tag_object)
+          - Source/workflow commit: $source_commit
+          - Polling/clipboard implementation commit: $IMPLEMENTATION_COMMIT
+          - Target: aarch64-unknown-linux-gnu on a native GitHub-hosted ARM64 runner
+          - Verification: formatting, check, tests, strict Clippy, release build, ELF/dependency/version checks
+          - License: GPL-3.0-or-later
+
+          Build details and dynamic dependencies are recorded in BUILD-METADATA.txt.
+          Third-party dependency and license data are recorded in ANiri-SBOM.cdx.json.
+          EOF
+
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --latest=false \
+            --title "ANiri $TAG for Anland (ARM64)" \
+            --notes-file release-notes.txt

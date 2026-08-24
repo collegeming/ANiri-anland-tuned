@@ -1,363 +1,124 @@
-name: CI
+name: ANiri ARM64 candidate
 
 on:
   push:
-  pull_request:
+    branches:
+      - anland-poll-optimize
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 1 * *' # Monthly
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aniri-arm64-candidate-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-  DEPS_APT: curl gcc clang libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpipewire-0.3-dev libpango1.0-dev libdisplay-info-dev
-  DEPS_DNF: cargo gcc clang libudev-devel libgbm-devel libxkbcommon-devel wayland-devel libinput-devel dbus-devel systemd-devel libseat-devel pipewire-devel pango-devel cairo-gobject-devel libdisplay-info-devel
-  DEPS_APK: cargo clang-libclang eudev-dev glib-dev libdisplay-info-dev libinput-dev libseat-dev libxkbcommon-dev mesa-dev pango-dev pipewire-dev tar
-  DEPS_PKG: git curl rust llvm pkgconf pixman libudev-devd libdisplay-info seatd libinput libxkbcommon pipewire mesa-libs cairo devel/glib20 gettext-runtime harfbuzz pango
+  CARGO_TERM_COLOR: always
+  DEBIAN_FRONTEND: noninteractive
+  IMPLEMENTATION_COMMIT: 74ce2a92eb2151d729818a784ced605ec950b56c
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-
-    name: test
-    runs-on: ubuntu-24.04
+  verify-and-build:
+    name: Verify and build ARM64 candidate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Check out candidate commit
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
+          fetch-depth: 0
           show-progress: false
 
-      - name: Install dependencies
+      - name: Install native build dependencies
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ${{ env.DEPS_APT }}
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            binutils clang curl file gcc libadwaita-1-dev libdbus-1-dev \
+            libdisplay-info-dev libegl1-mesa-dev libgbm-dev libinput-dev \
+            libpango1.0-dev libpipewire-0.3-dev libseat-dev libsystemd-dev \
+            libudev-dev libwayland-dev libxkbcommon-dev
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build tests
-        run: cargo test --no-run --all --exclude niri-visual-tests
-
-      - name: Test
-        run: cargo test --all --exclude niri-visual-tests -- --nocapture
-
-  build:
-    strategy:
-      fail-fast: false
-
-    name: check feature combinations
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - name: Install dependencies
+      - name: Select Rust toolchain
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ${{ env.DEPS_APT }}
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version --verbose
+          cargo --version --verbose
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Check (no default features)
-        run: cargo check --no-default-features
-
-      - name: Check (just dbus)
-        run: cargo check --no-default-features --features dbus
-
-      - name: Check (just systemd)
-        run: cargo check --no-default-features --features systemd
-
-      - name: Check (just dinit)
-        run: cargo check --no-default-features --features dinit
-
-      - name: Check (just xdp-gnome-screencast)
-        run: cargo check --no-default-features --features xdp-gnome-screencast
-
-      - name: Check
-        run: cargo check
-
-      - name: Build (with profiling)
-        run: cargo build --features profile-with-tracy
-
-  build-musl:
-    strategy:
-      fail-fast: false
-
-    name: alpine musl
-    runs-on: ubuntu-24.04
-    container: alpine:3
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - name: Install Deps
-        run: apk add --no-cache ${{ env.DEPS_APK }}
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --no-default-features --features dbus,xdp-gnome-screencast
-
-  # Job that runs randomized tests for a longer period of time.
-  # Also runs normal slow tests.
-  randomized-tests:
-    strategy:
-      fail-fast: false
-
-    name: randomized and slow tests
-    runs-on: ubuntu-24.04
-
-    env:
-      RUST_BACKTRACE: 1
-      RUN_SLOW_TESTS: 1
-      PROPTEST_CASES: 200000
-      PROPTEST_MAX_LOCAL_REJECTS: 200000
-      PROPTEST_MAX_GLOBAL_REJECTS: 200000
-      PROPTEST_MAX_SHRINK_ITERS: 200000
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ${{ env.DEPS_APT }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build tests
-        run: cargo test --no-run --all --exclude niri-visual-tests --release
-
-      - name: Test
-        run: cargo test --all --exclude niri-visual-tests --release
-
-  visual-tests:
-    strategy:
-      fail-fast: false
-
-    name: visual tests
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ${{ env.DEPS_APT }} libadwaita-1-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --package niri-visual-tests
-
-  msrv:
-    strategy:
-      fail-fast: false
-
-    name: msrv
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ${{ env.DEPS_APT }} libadwaita-1-dev
-
-      - uses: dtolnay/rust-toolchain@1.87.0
-
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo check --all-targets
-
-  clippy:
-    strategy:
-      fail-fast: false
-
-    name: clippy
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ${{ env.DEPS_APT }} libadwaita-1-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Run clippy
-        run: cargo clippy --all --all-targets
-
-  rustfmt:
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-
-      - name: Run rustfmt
+      - name: Check formatting
         run: cargo fmt --all -- --check
 
-  fedora:
-    runs-on: ubuntu-24.04
-    container: fedora:42
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --exclude niri-visual-tests --locked
 
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
+      - name: Run tests
+        run: cargo test --workspace --exclude niri-visual-tests --locked -- --nocapture
 
-      - name: Install dependencies
+      - name: Run strict Clippy
+        run: cargo clippy --workspace --all-targets --exclude niri-visual-tests --locked -- -D warnings
+
+      - name: Build native ARM64 release binary
+        env:
+          NIRI_BUILD_COMMIT: ${{ github.sha }}
+        run: cargo build --frozen --release --bin niri
+
+      - name: Generate CycloneDX SBOM
         run: |
-          sudo dnf update -y
-          sudo dnf install -y ${{ env.DEPS_DNF }} libadwaita-devel
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --override-filename ANiri-SBOM
+          test -s ANiri-SBOM.json
 
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --all
+      - name: Assemble and verify candidate assets
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          install -Dm755 target/release/niri dist/niri-arm64-linux-bin
+          install -Dm644 LICENSE dist/LICENSE
+          install -Dm644 ANiri-SBOM.json dist/ANiri-SBOM.cdx.json
 
-  freebsd:
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_HOME: /home/runner/work/niri/niri/cargo-home
+          binary_version=$(dist/niri-arm64-linux-bin --version)
+          elf_header=$(file dist/niri-arm64-linux-bin)
+          dependencies=$(ldd dist/niri-arm64-linux-bin)
+          readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Class:[[:space:]]+ELF64'
+          readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Machine:[[:space:]]+AArch64'
+          readelf -l dist/niri-arm64-linux-bin | grep -F 'Requesting program interpreter: /lib/ld-linux-aarch64.so.1'
 
-    steps:
-      - uses: actions/checkout@v6
+          cat >dist/NOTICE.txt <<'NOTICE'
+          ANiri is a downstream niri build for the Anland/Droidspaces integration.
+          The project is licensed under GPL-3.0-or-later; see the accompanying LICENSE.
+          Third-party Rust package names, versions, licenses, and dependency relationships
+          are recorded in ANiri-SBOM.cdx.json.
+          NOTICE
+
+          {
+            printf 'SOURCE_REPOSITORY=%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+            printf 'SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
+            printf 'IMPLEMENTATION_COMMIT=%s\n' "$IMPLEMENTATION_COMMIT"
+            printf 'WORKFLOW_COMMIT=%s\n' "$SOURCE_COMMIT"
+            printf 'TAG=candidate\n'
+            printf 'TARGET=aarch64-unknown-linux-gnu\n'
+            printf 'RUNNER_ARCH=%s\n' "$RUNNER_ARCH"
+            printf 'RUSTC=%s\n' "$(rustc --version)"
+            printf 'CARGO=%s\n' "$(cargo --version)"
+            printf 'BINARY_VERSION=%s\n' "$binary_version"
+            printf 'ELF=%s\n' "$elf_header"
+            printf 'DYNAMIC_DEPENDENCIES_BEGIN\n%s\nDYNAMIC_DEPENDENCIES_END\n' "$dependencies"
+          } >dist/BUILD-METADATA.txt
+
+          (cd dist && sha256sum niri-arm64-linux-bin ANiri-SBOM.cdx.json BUILD-METADATA.txt LICENSE NOTICE.txt >SHA256SUMS)
+          (cd dist && sha256sum --check SHA256SUMS)
+          dist/niri-arm64-linux-bin --version
+          file dist/niri-arm64-linux-bin
+          ldd dist/niri-arm64-linux-bin
+
+      - name: Upload candidate assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          show-progress: false
-
-      # Remove man-db triggers to speed up Ubuntu upgrade by a minute or two during vmactions/freebsd-vm action run.
-      - run: |
-          sudo rm /var/lib/dpkg/info/man-db.*
-
-      - name: Build
-        uses: vmactions/freebsd-vm@v1
-        with:
-          release: "15.0"
-          copyback: false
-          prepare: |
-            pkg update -f
-            pkg install -y ${{ env.DEPS_PKG }}
-          run: |
-            wcurl 'https://raw.githubusercontent.com/freebsd/freebsd-ports/268f8513e0b5f26e87b296f861059048196cbf8f/audio/songrec/files/patch-cargo-crates_pipewire-sys-0.10.0_build.rs'
-            wcurl 'https://raw.githubusercontent.com/freebsd/freebsd-ports/268f8513e0b5f26e87b296f861059048196cbf8f/audio/songrec/files/patch-cargo-crates_pipewire-sys-0.10.0_src_lib.rs'
-            wcurl 'https://raw.githubusercontent.com/freebsd/freebsd-ports/bc722672141332346c78fd4eed7cab079b4165cc/x11-wm/niri/files/patch-libdisplay-info-0.3'
-
-            export CARGO_HOME="$PWD/cargo-home"
-
-            cargo fetch
-
-            ( cd $CARGO_HOME/registry/src/index.crates.io-*/; patch -p1 < $CARGO_HOME/../patch-cargo-crates_pipewire-sys-0.10.0_build.rs; patch -p1 < $CARGO_HOME/../patch-cargo-crates_pipewire-sys-0.10.0_src_lib.rs; patch -p1 < $CARGO_HOME/../patch-libdisplay-info-0.3; )
-
-            cargo build \
-              --offline \
-              --no-default-features --features dbus,xdp-gnome-screencast
-
-  nix:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          dotnet: false
-          large-packages: false
-        
-      - uses: actions/checkout@v6
-        with:
-          show-progress: false
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        continue-on-error: true
-
-      - run: nix flake check
-        continue-on-error: true
-
-  publish-wiki:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs:
-      - publish-docs
-    permissions:
-      contents: write
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          lfs: true
-          show-progress: false
-
-      - uses: Andrew-Chen-Wang/github-wiki-action@b7e552d7cb0fa7f83e459012ffc6840fd87bcb83
-        with:
-          path: docs/wiki/
-
-  publish-docs:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs:
-      - test
-    permissions:
-      contents: write
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          lfs: true
-          show-progress: false
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-            enable-cache: true
-
-      - name: Install the project
-        run: uv sync --locked --all-extras --dev
-        working-directory: docs/
-
-      - name: Generate niri documentation
-        run: uv run mkdocs build
-        working-directory: docs/
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Generate rustdoc documentation
-        run: cargo doc --no-deps -p niri-ipc
-
-      - run: mkdir -p publish/niri_ipc
-      - run: cp -r ./target/doc/* ./publish/
-      - run: cp -r ./docs/site/* ./publish/
-
-      - name: Deploy documentation
-        if: github.ref == 'refs/heads/main'
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./publish
-          force_orphan: true
+          name: aniri-arm64-candidate-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
