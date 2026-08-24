@@ -64,6 +64,9 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           show-progress: false
 
+      - name: Trust only the exact checkout directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Verify annotated tag and release absence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -73,10 +76,17 @@ jobs:
           set -euo pipefail
           [[ "$TAG" =~ ^v26\.4\.0-anland\.[0-9]+$ ]]
           test "$TAG" != v26.4.0-anland.1
+          test "$TAG" != v26.4.0-anland.2
           test "$(git cat-file -t "refs/tags/$TAG")" = tag
           source_commit=$(git rev-parse "refs/tags/$TAG^{commit}")
           test "$source_commit" = "$(git rev-parse HEAD)"
-          test "$source_commit" = "$WORKFLOW_DEFINITION_COMMIT"
+          if [[ "$GITHUB_EVENT_NAME" = workflow_dispatch ]]; then
+            remote_workflow_commit=$(git ls-remote --heads origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)
+            test -n "$remote_workflow_commit"
+            test "$remote_workflow_commit" = "$WORKFLOW_DEFINITION_COMMIT"
+          else
+            test "$source_commit" = "$WORKFLOW_DEFINITION_COMMIT"
+          fi
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists; refusing to overwrite it." >&2
             exit 1
@@ -245,6 +255,9 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.RELEASE_TAG }}
           show-progress: false
+
+      - name: Trust only the exact checkout directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Download verified assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
