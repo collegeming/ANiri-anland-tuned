@@ -1,0 +1,219 @@
+# One-off: graft v26.04 baseline, rebase anland-poll-optimize onto
+# niri-wm/niri:main, resolve the known xdg_activate-rename + anland-backend
+# conflicts mechanically, verify with cargo check, then push a resolution
+# branch and open a PR. Does NOT touch anland-poll-optimize directly.
+name: ANiri sync resolve (one-off)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: niri-wm/niri
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: anland-poll-optimize
+  ORPHAN_ROOT: 1a33594f42efef6415096de504214269d82c247d
+  BASELINE_COMMIT: 8ed0da44d974c32c6877d2f4630c314da0717ecb
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          show-progress: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream & graft baseline
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          git replace --graft "$ORPHAN_ROOT" "$BASELINE_COMMIT"
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/$UPSTREAM_BRANCH)" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHORT=$(git rev-parse --short=12 upstream/$UPSTREAM_BRANCH)" >> "$GITHUB_ENV"
+
+      - name: Write conflict resolver
+        run: |
+          cat > /tmp/resolve.py <<'PY'
+          import re, sys
+          path = sys.argv[1]
+          with open(path, encoding='utf-8', errors='surrogateescape') as f:
+              text = f.read()
+          pat = re.compile(r'<<<<<<< [^\n]*\n(.*?)=======\n(.*?)>>>>>>> [^\n]*\n', re.S)
+          unresolved = []
+          def repl(m):
+              head = m.group(1)
+              theirs = m.group(2)
+              # xdg_activate rename (bool -> enum): take upstream (HEAD) side.
+              if 'focus_on_xdg_activate' in theirs or 'focus-on-xdg-activate' in theirs:
+                  return head
+              # anland backend import: keep anland's Backend import + upstream's use lines.
+              if 'use crate::backend::Backend;' in theirs:
+                  return 'use crate::backend::Backend;\n' + head
+              # Cargo.lock: anland added "cc" build dep; keep it.
+              if ' "cc",' in theirs and ' "cc",' not in head:
+                  return theirs
+              unresolved.append(path)
+              return m.group(0)
+          new = pat.sub(repl, text)
+          if unresolved:
+              print(f"UNRESOLVED conflicts in {path}", file=sys.stderr)
+              sys.exit(2)
+          # ensure head side of xdg blocks didn't leave the malformed joined line
+          with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+              f.write(new)
+          PY
+
+      - name: Rebase with resolution loop
+        id: rebase
+        run: |
+          set +e
+          git rebase "upstream/$UPSTREAM_BRANCH" >/tmp/rebase.log 2>&1
+          echo "$?" >/tmp/rebase_rc
+          cat /tmp/rebase.log
+          round=0
+          while [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; do
+            round=$((round+1))
+            echo "===== conflict round $round ====="
+            conflicted=$(git diff --name-only --diff-filter=U)
+            echo "conflicted: $conflicted"
+            ok=1
+            for f in $conflicted; do
+              if python3 /tmp/resolve.py "$f"; then
+                git add "$f"
+              else
+                echo "could not resolve $f"
+                ok=0
+              fi
+            done
+            if [ $ok -ne 1 ]; then
+              echo "REBASE_STATUS=unresolved" >> "$GITHUB_ENV"
+              git rebase --abort
+              exit 0
+            fi
+            GIT_EDITOR=true git rebase --continue >>/tmp/rebase.log 2>&1
+          done
+          if [ -f .git/rebase-merge ] || false; then echo "still in rebase"; fi
+          # If we get here, rebase finished.
+          rc=$(cat /tmp/rebase_rc 2>/dev/null || echo 0)
+          echo "REBASE_STATUS=done" >> "$GITHUB_ENV"
+          echo "REBASE_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install build deps for cargo check
+        if: env.REBASE_STATUS == 'done'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libwayland-dev libinput-dev libudev-dev \
+            libdbus-1-dev libpango1.0-dev libglib2.0-dev libdrm-dev \
+            libdisplay-info-dev libxkbcommon-dev libpixman-1-dev libpipewire-0.3-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libgbm-dev
+          rustup init -y --default-toolchain stable --profile minimal 2>/dev/null || true
+          source "$HOME/.cargo/env"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustc --version
+
+      - name: cargo check (verification gate)
+        id: check
+        if: env.REBASE_STATUS == 'done'
+        run: |
+          source "$HOME/.cargo/env"
+          cargo check --workspace --all-targets 2>&1 | tee /tmp/cargo-check.log
+          echo "CARGO_CHECK=pass" >> "$GITHUB_ENV"
+        continue-on-error: true
+
+      - name: Prepare resolution branch & PR body
+        if: env.REBASE_STATUS == 'done'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BR="sync/resolve-${UPSTREAM_SHORT}"
+          git branch -f "$BR" HEAD
+          # Restore fork workflows on the branch (avoid pushing niri's workflows).
+          git checkout "$TARGET_BRANCH" -- .github/workflows
+          git commit -m "chore(sync-resolve): keep fork workflow files" --no-verify >/dev/null || true
+          git push --force origin "$BR"
+          status="compiles ✓"
+          if [ "${CARGO_CHECK:-}" != "pass" ]; then status="cargo check FAILED — see log"; fi
+          LOG_TAIL=$(tail -60 /tmp/cargo-check.log 2>/dev/null | sed 's/`//g')
+          cat > /tmp/pr_body.md <<EOF
+          One-off resolution of the first niri-wm/niri upstream sync.
+
+          - Upstream: \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`
+          - Baseline graft: \`$BASELINE_COMMIT\` (niri v26.04)
+          - Rebase: \`anland-poll-optimize\` replayed onto upstream main
+          - Verification: **$status**
+
+          Resolution rules applied (all conflicts stem from niri renaming
+          \`focus-on-xdg-activate\` (bool) -> \`on-xdg-activate\` (enum) since v26.04):
+          - xdg-activate conflicts (lib.rs, window_rule.rs, window/mod.rs, handlers xdg blocks, docs) -> took upstream
+          - \`use crate::backend::Backend;\` (anland) -> kept, plus upstream's use lines
+          - \` "cc",\` in Cargo.lock (anland build dep) -> kept
+
+          After merge, anland-poll-optimize gains real niri ancestry and the daily
+          \`sync-upstream.yml\` rebase will run clean.
+          EOF
+          if [ "$status" != "compiles ✓" ]; then
+            echo "" >> /tmp/pr_body.md
+            echo '```' >> /tmp/pr_body.md
+            echo "$LOG_TAIL" >> /tmp/pr_body.md
+            echo '```' >> /tmp/pr_body.md
+          fi
+          existing=$(gh pr list --base "$TARGET_BRANCH" --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            gh pr comment "$existing" --body "Re-ran sync-resolve: $status"
+          else
+            gh pr create --base "$TARGET_BRANCH" --head "$BR" \
+              --title "sync-resolve: rebase anland-poll-optimize onto $UPSTREAM_REPO@$UPSTREAM_SHORT" \
+              --body-file /tmp/pr_body.md || \
+            echo "PR_CREATE_BLOCKED: https://github.com/${GITHUB_REPOSITORY}/compare/${TARGET_BRANCH}...${BR}"
+          fi
+          echo "RES_BRANCH=$BR" >> "$GITHUB_ENV"
+
+      - name: Unresolved-conflict PR
+        if: env.REBASE_STATUS == 'unresolved'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BR="sync/resolve-${UPSTREAM_SHORT}"
+          git branch -f "$BR" "upstream/$UPSTREAM_BRANCH"
+          git checkout "$BR" -- .github/workflows 2>/dev/null || true
+          git checkout -B "$BR" "$BR"
+          rm -rf .github/workflows
+          git checkout "$TARGET_BRANCH" -- .github/workflows
+          git add .github/workflows
+          git commit -m "chore(sync-resolve): keep fork workflow files" --no-verify >/dev/null || true
+          git push --force origin "$BR"
+          COMPARE="https://github.com/${GITHUB_REPOSITORY}/compare/${TARGET_BRANCH}...${BR}"
+          echo "::warning::Rebase had unresolvable conflicts; manual review needed: $COMPARE"
+          echo "RES_BRANCH=$BR" >> "$GITHUB_ENV"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Sync-resolve summary"
+            echo ""
+            echo "- Upstream: \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`"
+            echo "- Rebase: ${REBASE_STATUS:-unknown}"
+            if [ "${CARGO_CHECK:-}" = "pass" ]; then echo "- cargo check: ✓"; fi
+            if [ -n "${RES_BRANCH:-}" ]; then
+              echo "- Branch: \`$RES_BRANCH\`"
+              echo "- Compare: https://github.com/${GITHUB_REPOSITORY}/compare/${TARGET_BRANCH}...${RES_BRANCH}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
