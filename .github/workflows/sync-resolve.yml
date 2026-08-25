@@ -127,10 +127,11 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libwayland-dev libinput-dev libudev-dev \
-            libdbus-1-dev libpango1.0-dev libglib2.0-dev libdrm-dev \
-            libdisplay-info-dev libxkbcommon-dev libpixman-1-dev libpipewire-0.3-dev \
-            libegl1-mesa-dev libgles2-mesa-dev libgbm-dev
+            build-essential clang curl pkg-config libwayland-dev libinput-dev \
+            libudev-dev libsystemd-dev libseat-dev libgbm-dev libxkbcommon-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libpango1.0-dev \
+            libglib2.0-dev libdrm-dev libdisplay-info-dev libpixman-1-dev \
+            libpipewire-0.3-dev
           rustup init -y --default-toolchain stable --profile minimal 2>/dev/null || true
           source "$HOME/.cargo/env"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
