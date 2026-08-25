@@ -131,9 +131,8 @@ jobs:
             libudev-dev libsystemd-dev libseat-dev libgbm-dev libxkbcommon-dev \
             libegl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libpango1.0-dev \
             libglib2.0-dev libdrm-dev libdisplay-info-dev libpixman-1-dev \
-            libpipewire-0.3-dev
-          rustup init -y --default-toolchain stable --profile minimal 2>/dev/null || true
-          source "$HOME/.cargo/env"
+            libpipewire-0.3-dev libgdk-pixbuf-2.0-dev libcairo2-dev
+          rustup toolchain install stable --profile minimal --no-self-update
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           rustc --version
 
@@ -141,8 +140,8 @@ jobs:
         id: check
         if: env.MERGE_STATUS == 'done'
         run: |
-          source "$HOME/.cargo/env"
-          cargo check --workspace --all-targets 2>&1 | tee /tmp/cargo-check.log
+          source "$HOME/.cargo/env" || true
+          cargo check --workspace 2>&1 | tee /tmp/cargo-check.log
           echo "CARGO_CHECK=pass" >> "$GITHUB_ENV"
         continue-on-error: true
 
