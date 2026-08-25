@@ -29,6 +29,8 @@ jobs:
       - name: Fetch upstream & graft
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
           git fetch --no-tags upstream "$UPSTREAM_BRANCH"
           git replace --graft "$ORPHAN_ROOT" "$BASELINE_COMMIT"
