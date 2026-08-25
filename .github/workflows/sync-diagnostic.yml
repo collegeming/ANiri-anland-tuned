@@ -1,4 +1,5 @@
-# One-off diagnostic v2: print actual conflict-marker regions per file.
+# One-off diagnostic v3 (merge mode): graft baseline, merge niri-wm/niri:main,
+# dump ALL conflict blocks (CRLF-agnostic) for every conflicted file.
 name: ANiri sync diagnostic
 
 on:
@@ -32,29 +33,28 @@ jobs:
           git fetch --no-tags upstream "$UPSTREAM_BRANCH"
           git replace --graft "$ORPHAN_ROOT" "$BASELINE_COMMIT"
 
-      - name: Attempt rebase
+      - name: Merge & dump conflicts
         run: |
           set +e
-          git rebase "upstream/$UPSTREAM_BRANCH" >/tmp/rebase.log 2>&1
-          cat /tmp/rebase.log
-          echo "REBASE_RC=$?" >> "$GITHUB_ENV"
-          exit 0
-
-      - name: Dump conflict-marker regions
-        run: |
-          set +e
-          files=$(git diff --name-only --diff-filter=U)
-          echo "Conflicted files: $(echo "$files" | wc -l)"
-          echo "$files" | while read -r f; do
-            [ -z "$f" ] && continue
-            echo ""
-            echo "############### FILE: $f ################"
-            # Print each conflict block with 10 lines of context before/after.
-            grep -n -E '^(<<<<<<<|=======|>>>>>>>)' "$f" | while read -r m; do
-              ln=${m%%:*}
-              echo "--- marker block @ line $ln ---"
-              sed -n "$((ln-10)),$((ln+60))p" "$f"
-              echo "<<< end block >>>"
-            done
-          done
+          git merge "upstream/$UPSTREAM_BRANCH" --no-edit >/tmp/m.log 2>&1
+          cat /tmp/m.log
+          cat > /tmp/dump.py <<'PY'
+          import re, sys
+          for f in sys.argv[1:]:
+              try:
+                  with open(f, encoding='utf-8', errors='surrogateescape') as fh:
+                      t = fh.read()
+              except Exception as e:
+                  print(f"!! cannot read {f}: {e}"); continue
+              pat = re.compile(r'<<<<<<< [^\n]*\r?\n(.*?)=======\r?\n(.*?)>>>>>>>[^\n]*\r?\n', re.S)
+              blocks = list(pat.finditer(t))
+              print(f"\n############### FILE: {f}  ({len(blocks)} block(s)) ################")
+              for i,m in enumerate(blocks,1):
+                  head=m.group(1); theirs=m.group(2)
+                  print(f"--- block {i} HEAD (anland/ours) [{len(head)} chars] ---")
+                  print(head[:1200])
+                  print(f"--- block {i} THEIRS (upstream) [{len(theirs)} chars] ---")
+                  print(theirs[:1200])
+          PY
+          python3 /tmp/dump.py $(git diff --name-only --diff-filter=U)
           exit 0
