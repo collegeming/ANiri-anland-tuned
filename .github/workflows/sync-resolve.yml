@@ -141,7 +141,9 @@ jobs:
         if: env.MERGE_STATUS == 'done'
         run: |
           source "$HOME/.cargo/env" || true
-          cargo check --workspace 2>&1 | tee /tmp/cargo-check.log
+          # Check only the crates touched by the merge resolution; avoids the
+          # xdg-desktop-portal-dump subcrate's gtk stack (not relevant here).
+          cargo check -p niri -p niri-config -p niri-ipc 2>&1 | tee /tmp/cargo-check.log
           echo "CARGO_CHECK=pass" >> "$GITHUB_ENV"
         continue-on-error: true
 
