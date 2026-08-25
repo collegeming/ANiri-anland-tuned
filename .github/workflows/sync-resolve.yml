@@ -68,7 +68,11 @@ jobs:
               if b'focus_on_xdg_activate' in head or b'focus-on-xdg-activate' in head:
                   return theirs
               # Upstream added content where anland had none (e.g. new import).
+              # If the import already exists elsewhere in the file, skip it
+              # (anland already has it); otherwise accept upstream's addition.
               if head.strip() == b'':
+                  if theirs.strip() in data and theirs.strip().startswith(b'use '):
+                      return head
                   return theirs
               unknown.append((head, theirs))
               return m.group(0)
@@ -79,6 +83,19 @@ jobs:
                   print(f"--- block {i} HEAD (anland) ---\n{h[:800]!r}", file=sys.stderr)
                   print(f"--- block {i} THEIRS (upstream) ---\n{t[:800]!r}", file=sys.stderr)
               sys.exit(2)
+          # Dedup exact-duplicate `use ...;` lines (merge can keep both anland's
+          # and upstream's copy of an import added on both sides).
+          lines = new.split(b'\n')
+          seen = set()
+          out = []
+          for ln in lines:
+              s = ln.strip()
+              if s.startswith(b'use ') and s.endswith(b';'):
+                  if s in seen:
+                      continue
+                  seen.add(s)
+              out.append(ln)
+          new = b'\n'.join(out)
           with open(path, 'wb') as f:
               f.write(new)
           print(f"resolved {path}")
