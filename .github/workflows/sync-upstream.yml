@@ -1,18 +1,13 @@
-# Reconstructs a shared ancestor with niri-wm/niri and rebases
-# anland-poll-optimize onto niri-wm/niri:main daily.
+# Daily upstream sync: merge niri-wm/niri:main into anland-poll-optimize.
 #
-# Why the graft: anland-poll-optimize is an orphan branch whose root commit
-# 1a33594 ("feat: anland backend") dropped the full niri tree as a single
-# commit, so it has no git-level common ancestor with niri-wm/niri. That root
-# was derived from niri-wm/niri v26.04 (commit 8ed0da44, confirmed by the
-# workspace version 26.4.0 in Cargo.toml). We graft v26.04 as the orphan
-# root's parent at runtime so `git rebase upstream/main` has a real merge-base
-# to work from. After the first clean rebase is pushed, the branch gains real
-# niri ancestry and the graft step becomes a no-op (self-healing).
+# After the one-off first sync (PR #1), anland-poll-optimize has real niri
+# ancestry, so no baseline graft is needed — a plain `git merge` suffices.
+# Merge (not rebase) is used because the branch contains merge commits and we
+# must not rewrite history (release tags are anchored to existing commits).
 #
-# - Clean rebase: push --force-with-lease to anland-poll-optimize.
-# - Conflicts: open a PR (base=anland-poll-optimize, head=upstream snapshot)
-#   and @mention the owner for manual resolution.
+# - Already in sync: skip.
+# - Clean merge: push to anland-poll-optimize (fast, no force-push).
+# - Conflicts: push a sync branch + open a PR for manual resolution.
 name: ANiri upstream sync
 
 on:
@@ -32,14 +27,10 @@ env:
   UPSTREAM_REPO: niri-wm/niri
   UPSTREAM_BRANCH: main
   TARGET_BRANCH: anland-poll-optimize
-  # Orphan root of anland-poll-optimize (parentless), derived from niri v26.04.
-  ORPHAN_ROOT: 1a33594f42efef6415096de504214269d82c247d
-  # niri-wm/niri v26.04 commit, the baseline the orphan root was built on.
-  BASELINE_COMMIT: 8ed0da44d974c32c6877d2f4630c314da0717ecb
 
 jobs:
   sync:
-    name: Graft baseline and rebase onto niri-wm/niri main
+    name: Merge niri-wm/niri:main into anland-poll-optimize
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -51,12 +42,12 @@ jobs:
           show-progress: false
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure git identity
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Fetch upstream (full history; includes BASELINE_COMMIT)
+      - name: Fetch upstream
         run: |
           set -euo pipefail
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
@@ -64,20 +55,6 @@ jobs:
           echo "UPSTREAM_SHA=$(git rev-parse "upstream/$UPSTREAM_BRANCH")" >> "$GITHUB_ENV"
           echo "UPSTREAM_SHORT=$(git rev-parse --short=12 "upstream/$UPSTREAM_BRANCH")" >> "$GITHUB_ENV"
           echo "TARGET_SHA=$(git rev-parse "$TARGET_BRANCH")" >> "$GITHUB_ENV"
-
-      - name: Graft baseline as orphan root parent
-        run: |
-          set -euo pipefail
-          # Only graft while the orphan root is still the branch root and
-          # remains parentless. After the first clean rebase+push the root is
-          # rewritten away and this step skips itself.
-          if [ "$(git cat-file -t "$ORPHAN_ROOT" 2>/dev/null || true)" = commit ] && \
-             [ -z "$(git rev-list --parents -n 1 "$ORPHAN_ROOT" | cut -d' ' -f2-)" ]; then
-            git replace --graft "$ORPHAN_ROOT" "$BASELINE_COMMIT"
-            echo "Grafted $ORPHAN_ROOT -> parent $BASELINE_COMMIT"
-          else
-            echo "Orphan root absent or already parented; skipping graft."
-          fi
 
       - name: Check if upstream is already contained
         id: need
@@ -90,46 +67,49 @@ jobs:
             echo "result=sync" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Attempt clean rebase
-        id: rebase
+      - name: Attempt clean merge
+        id: merge
         if: steps.need.outputs.result == 'sync'
         run: |
-          set -euo pipefail
-          if git rebase "upstream/$UPSTREAM_BRANCH"; then
-            echo "outcome=clean" >> "$GITHUB_OUTPUT"
-          else
-            git rebase --abort
+          set +e
+          git merge "upstream/$UPSTREAM_BRANCH" --no-edit >/tmp/merge.log 2>&1
+          cat /tmp/merge.log
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            git merge --abort
             echo "outcome=conflict" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=clean" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Push (clean rebase)
-        if: steps.rebase.outputs.outcome == 'clean'
+      - name: Push (clean merge)
+        if: steps.merge.outputs.outcome == 'clean'
         run: |
           set -euo pipefail
-          git push --force-with-lease origin "$TARGET_BRANCH"
-          echo "::notice::Rebased $TARGET_BRANCH onto $UPSTREAM_REPO@$UPSTREAM_SHORT and pushed."
+          # Restore fork workflows (don't let upstream's clobber the ARM64 ones).
+          git checkout "$TARGET_BRANCH" -- .github/workflows
+          git add .github/workflows
+          git commit --amend --no-edit >/dev/null || true
+          git push origin "$TARGET_BRANCH"
+          echo "::notice::Merged $UPSTREAM_REPO@$UPSTREAM_SHORT into $TARGET_BRANCH and pushed."
 
       - name: Open conflict-resolution PR
-        if: steps.rebase.outputs.outcome == 'conflict'
+        if: steps.merge.outputs.outcome == 'conflict'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           BR="sync/niri-upstream-${UPSTREAM_SHORT}"
-          # Start the PR head from upstream/main, but restore the fork's own
-          # workflow files so the push introduces no .github/workflows change
-          # (GITHUB_TOKEN cannot push workflow-file changes). The PR will still
-          # surface real conflicts on non-workflow files.
+          # Start the PR head from upstream/main, restore fork workflows so the
+          # push introduces no .github/workflows change (GITHUB_TOKEN can't).
           git checkout -B "$BR" "upstream/$UPSTREAM_BRANCH"
           rm -rf .github/workflows
           git checkout "$TARGET_BRANCH" -- .github/workflows
           git add .github/workflows
           git commit -m "chore(sync): keep fork workflow files" --no-verify >/dev/null
           git push --force origin "$BR"
+          COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${TARGET_BRANCH}...${BR}"
           PR_BODY=$(cat <<EOF
-          Automatic upstream sync from \`$UPSTREAM_REPO:$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`.
-
-          A clean rebase of \`$TARGET_BRANCH\` onto upstream failed with conflicts and needs manual resolution. The orphan history now shares the v26.04 baseline (\`$BASELINE_COMMIT\`) via a runtime graft, so resolving once should make future syncs clean.
+          Automatic upstream merge from \`$UPSTREAM_REPO:$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\` failed with conflicts and needs manual resolution.
 
           - Upstream HEAD: $UPSTREAM_SHA
           - Target HEAD (before sync): $TARGET_SHA
@@ -139,42 +119,36 @@ jobs:
           git remote add upstream https://github.com/$UPSTREAM_REPO.git
           git fetch upstream $UPSTREAM_BRANCH
           git checkout $TARGET_BRANCH
-          git replace --graft $ORPHAN_ROOT $BASELINE_COMMIT
-          git rebase upstream/$UPSTREAM_BRANCH
-          # resolve conflicts, then:
-          git push --force-with-lease origin $TARGET_BRANCH
+          git merge upstream/$UPSTREAM_BRANCH
+          # resolve conflicts, keep fork's .github/workflows, then:
+          git push origin $TARGET_BRANCH
           \`\`\`
           cc @${{ github.repository_owner }}
           EOF
           )
-          COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${TARGET_BRANCH}...${BR}"
           existing=$(gh pr list --base "$TARGET_BRANCH" --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null || true)
           if [ -n "$existing" ]; then
             gh pr comment "$existing" --body "Re-ran sync; conflicts still present upstream @ \`$UPSTREAM_SHORT\`." || true
-            echo "PR #$existing updated." >> /tmp/sync_outcome.txt
-          elif gh pr create --base "$TARGET_BRANCH" --head "$BR" \
-              --title "sync: rebase $TARGET_BRANCH onto $UPSTREAM_REPO@$UPSTREAM_SHORT (conflicts)" \
-              --body "$PR_BODY" ; then
-            echo "PR created." >> /tmp/sync_outcome.txt
           else
-            # PR creation is gated by the repo setting "Allow GitHub Actions to
-            # create and approve pull requests"; fall back to the compare URL.
-            echo "PR_CREATE_BLOCKED" >> /tmp/sync_outcome.txt
+            gh pr create --base "$TARGET_BRANCH" --head "$BR" \
+              --title "sync: merge $UPSTREAM_REPO@$UPSTREAM_SHORT (conflicts)" \
+              --body "$PR_BODY" || \
+            echo "PR_CREATE_BLOCKED"
           fi
           echo "COMPARE_URL=$COMPARE_URL" >> "$GITHUB_ENV"
-          echo "::warning::Upstream sync produced conflicts; resolve via $COMPARE_URL"
+          echo "::warning::Upstream merge produced conflicts; resolve via $COMPARE_URL"
 
       - name: Summary
         if: always()
         run: |
           r="${{ steps.need.outputs.result }}"
-          o="${{ steps.rebase.outputs.outcome }}"
+          o="${{ steps.merge.outputs.outcome }}"
           case "$r" in
             none) msg="already in sync" ;;
             sync) case "$o" in
-                    clean)    msg="rebased & pushed" ;;
-                    conflict) msg="conflicts -> needs manual resolution" ;;
-                    *)        msg="rebase did not run" ;;
+                    clean)    msg="merged & pushed" ;;
+                    conflict) msg="conflicts -> resolve via ${COMPARE_URL:-PR}" ;;
+                    *)        msg="merge did not run" ;;
                   esac ;;
             *) msg="n/a" ;;
           esac
@@ -182,14 +156,5 @@ jobs:
             echo "### Upstream sync summary"
             echo ""
             echo "- Upstream: \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`"
-            echo "- Baseline graft: \`$BASELINE_COMMIT\`"
             echo "- Outcome: $msg"
-            if [ -f /tmp/sync_outcome.txt ]; then
-              case "$(cat /tmp/sync_outcome.txt)" in
-                PR_CREATE_BLOCKED)
-                  echo "- PR auto-creation blocked by repo setting; open manually:"
-                  echo "  ${COMPARE_URL:-}" ;;
-                *) echo "- $(cat /tmp/sync_outcome.txt)" ;;
-              esac
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
