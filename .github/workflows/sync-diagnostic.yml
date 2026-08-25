@@ -1,0 +1,70 @@
+# One-off diagnostic: graft baseline, rebase onto niri-wm/niri:main, and dump
+# every conflict hunk to the run log so the resolution can be planned offline.
+name: ANiri sync diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: niri-wm/niri
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: anland-poll-optimize
+  ORPHAN_ROOT: 1a33594f42efef6415096de504214269d82c247d
+  BASELINE_COMMIT: 8ed0da44d974c32c6877d2f4630c314da0717ecb
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          echo "UPSTREAM_SHA=$(git rev-parse upstream/$UPSTREAM_BRANCH)" >> "$GITHUB_ENV"
+
+      - name: Graft baseline
+        run: |
+          set -euo pipefail
+          git replace --graft "$ORPHAN_ROOT" "$BASELINE_COMMIT"
+          echo "merge-base: $(git merge-base $TARGET_BRANCH upstream/$UPSTREAM_BRANCH)"
+
+      - name: Attempt rebase (capture conflicts)
+        run: |
+          set +e
+          git rebase "upstream/$UPSTREAM_BRANCH" >/tmp/rebase.log 2>&1
+          rc=$?
+          cat /tmp/rebase.log
+          if [ $rc -ne 0 ]; then
+            echo "REBASE_CONFLICT=1" >> "$GITHUB_ENV"
+          fi
+          exit 0
+
+      - name: Dump conflicts
+        if: env.REBASE_CONFLICT == '1'
+        run: |
+          set +e
+          echo "===== CONFLICTED FILES ====="
+          git diff --name-only --diff-filter=U | tee /tmp/conflicted.txt
+          echo "===== COUNT ====="
+          wc -l < /tmp/conflicted.txt
+          while read -r f; do
+            [ -z "$f" ] && continue
+            echo ""
+            echo "########## FILE: $f ##########"
+            echo "----- base (v26.04) -----"
+            git show "$BASELINE_COMMIT:$f" 2>/dev/null | head -0
+            echo "----- conflict markers (full) -----"
+            git diff -U9999 -- "$f"
+          done < /tmp/conflicted.txt
+          exit 0
