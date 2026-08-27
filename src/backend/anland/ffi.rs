@@ -75,7 +75,7 @@ struct screen_info {
     refresh: u32,
 }
 
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct buf_info {
     pub stride: u32,
@@ -532,7 +532,12 @@ unsafe fn receive_dmabufs_inner(ctx: &mut display_ctx) -> c_int {
         return -1;
     }
 
-    let count = dhdr.size as usize / std::mem::size_of::<buf_info>();
+    // Wire-format buf_info is packed (28 bytes); the Rust struct is repr(C)
+    // (32 bytes with 4 bytes tail padding). Field offsets 0..27 match, so we
+    // recv the packed bytes contiguously, then copy 28 per element into the
+    // repr(C) struct (the trailing padding stays zero from `default()`).
+    const WIRE_BUF_INFO: usize = 28;
+    let count = dhdr.size as usize / WIRE_BUF_INFO;
     if count != fd_count as usize || count > MAX_BUFS {
         for i in 0..fd_count as usize {
             if fds[i] >= 0 {
@@ -542,19 +547,22 @@ unsafe fn receive_dmabufs_inner(ctx: &mut display_ctx) -> c_int {
         return -1;
     }
 
-    let mut infos: [buf_info; MAX_BUFS] = [buf_info::default(); MAX_BUFS];
-    if recv_all(
-        ctx.data_fd,
-        &mut infos[0] as *mut buf_info as *mut u8,
-        dhdr.size as usize,
-    ) < 0
-    {
+    let mut wire = [0u8; MAX_BUFS * WIRE_BUF_INFO];
+    if recv_all(ctx.data_fd, wire.as_mut_ptr(), dhdr.size as usize) < 0 {
         for i in 0..fd_count as usize {
             if fds[i] >= 0 {
                 libc::close(fds[i]);
             }
         }
         return -1;
+    }
+    let mut infos: [buf_info; MAX_BUFS] = [buf_info::default(); MAX_BUFS];
+    for i in 0..count {
+        ptr::copy_nonoverlapping(
+            wire.as_ptr().add(i * WIRE_BUF_INFO),
+            &mut infos[i] as *mut buf_info as *mut u8,
+            WIRE_BUF_INFO,
+        );
     }
 
     // Drop the previous set, then install the new one.
