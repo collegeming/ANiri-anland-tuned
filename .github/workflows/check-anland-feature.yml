@@ -34,16 +34,16 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           rustc --version
 
-      - name: "Feature ON: cargo check -p niri --features anland"
+      - name: "Feature ON (default): cargo check -p niri"
         run: |
           source "$HOME/.cargo/env" || true
-          cargo check -p niri --features anland 2>&1 | tee /tmp/check-on.log
+          cargo check -p niri 2>&1 | tee /tmp/check-on.log
           grep -q "Finished" /tmp/check-on.log
 
-      - name: "Feature OFF: cargo check -p niri (default features)"
+      - name: "Feature OFF: cargo check -p niri --no-default-features --features dbus,systemd,xdp-gnome-screencast"
         run: |
           source "$HOME/.cargo/env" || true
-          cargo check -p niri 2>&1 | tee /tmp/check-off.log
+          cargo check -p niri --no-default-features --features dbus,systemd,xdp-gnome-screencast 2>&1 | tee /tmp/check-off.log
           grep -q "Finished" /tmp/check-off.log
 
       - name: "Feature OFF sanity: no Anland symbols in cargo metadata"
