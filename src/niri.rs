@@ -118,7 +118,9 @@ use wayland_server::protocol::wl_output::WlOutput;
 use crate::a11y::A11y;
 use crate::animation::Clock;
 use crate::backend::tty::SurfaceDmabufFeedback;
-use crate::backend::{Anland, Backend, Headless, RenderResult, Tty, Winit};
+use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
+#[cfg(feature = "anland")]
+use crate::backend::Anland;
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
 #[cfg(feature = "dbus")]
 use crate::dbus::freedesktop_locale1::Locale1ToNiri;
@@ -722,10 +724,7 @@ impl State {
             || env::var_os("WAYLAND_SOCKET").is_some()
             || env::var_os("DISPLAY").is_some();
 
-        let mut backend = if env::var_os("ANLAND").is_some() {
-            let anland = Anland::new().context("error initializing the Anland backend")?;
-            Backend::Anland(anland)
-        } else if headless {
+        let mut backend = if headless {
             let headless = Headless::new();
             Backend::Headless(headless)
         } else if has_display {
@@ -736,6 +735,14 @@ impl State {
                 .context("error initializing the TTY backend")?;
             Backend::Tty(tty)
         };
+
+        // The Anland backend is selected via the ANLAND env var, overriding the
+        // default backend choice above; gated to keep this file upstream-clean.
+        #[cfg(feature = "anland")]
+        if env::var_os("ANLAND").is_some() {
+            let anland = Anland::new().context("error initializing the Anland backend")?;
+            backend = Backend::Anland(anland);
+        }
 
         let mut niri = Niri::new(
             config.clone(),
