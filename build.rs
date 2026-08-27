@@ -11,32 +11,36 @@ fn main() {
 
     // Anland backend C sources are only compiled when the `anland` feature
     // (and thus the optional `cc` dependency) is enabled.
-    if std::env::var_os("CARGO_FEATURE_ANLAND").is_some() {
-        // The anland audio bridge links against libpipewire.
-        let pipewire = pkg_config::Config::new().probe("libpipewire-0.3");
+    #[cfg(feature = "anland")]
+    build_anland();
+}
 
-        let mut build = cc::Build::new();
-        build
-            .file("src/backend/anland/c/libdisplay_producer/display_producer.c")
-            .file("src/backend/anland/c/common/socket_utils.c")
-            .include("src/backend/anland/c")
-            .warnings(false);
+#[cfg(feature = "anland")]
+fn build_anland() {
+    // The anland audio bridge links against libpipewire.
+    let pipewire = pkg_config::Config::new().probe("libpipewire-0.3");
 
-        if let Ok(lib) = &pipewire {
-            for path in &lib.include_paths {
-                build.include(path);
-            }
-            for lib in &lib.libs {
-                println!("cargo:rustc-link-lib=dylib={lib}");
-            }
-            for path in &lib.link_paths {
-                println!("cargo:rustc-link-search=native={}", path.display());
-            }
-            println!("cargo:rustc-cfg=have_anland_audio");
-            build.file("src/backend/anland/c/anland_audio.c");
-            build.file("src/backend/anland/c/anland_camera.c");
+    let mut build = cc::Build::new();
+    build
+        .file("src/backend/anland/c/libdisplay_producer/display_producer.c")
+        .file("src/backend/anland/c/common/socket_utils.c")
+        .include("src/backend/anland/c")
+        .warnings(false);
+
+    if let Ok(lib) = &pipewire {
+        for path in &lib.include_paths {
+            build.include(path);
         }
-
-        build.compile("display_producer");
+        for lib in &lib.libs {
+            println!("cargo:rustc-link-lib=dylib={lib}");
+        }
+        for path in &lib.link_paths {
+            println!("cargo:rustc-link-search=native={}", path.display());
+        }
+        println!("cargo:rustc-cfg=have_anland_audio");
+        build.file("src/backend/anland/c/anland_audio.c");
+        build.file("src/backend/anland/c/anland_camera.c");
     }
+
+    build.compile("display_producer");
 }
