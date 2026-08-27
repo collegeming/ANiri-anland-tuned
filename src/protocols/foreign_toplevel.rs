@@ -5,13 +5,11 @@ use std::sync::Arc;
 use arrayvec::ArrayVec;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::{
-    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
-    ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1}, ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::{
-    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
-    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1}, zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
 use smithay::reexports::wayland_server::backend::ClientId;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
@@ -21,13 +19,13 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::wayland::{Dispatch2, GlobalDispatch2};
 use smithay::wayland::shell::xdg::{
-    ToplevelState, ToplevelStateSet, XdgToplevelSurfaceRoleAttributes,
+    ToplevelState, ToplevelStateSet, XdgToplevelSurfaceRoleAttributes
 };
 
 use crate::niri::State;
 use crate::protocols::EmptyData;
-use crate::utils::with_toplevel_role_and_current;
 use crate::window::mapped::MappedId;
+use crate::utils::with_toplevel_role_and_current;
 
 const EXT_LIST_VERSION: u32 = 1;
 const WLR_MANAGEMENT_VERSION: u32 = 3;
