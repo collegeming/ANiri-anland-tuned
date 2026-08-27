@@ -56,7 +56,9 @@ use smithay::wayland::selection::primary_selection::{
 use smithay::wayland::selection::wlr_data_control::{
     DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
 };
-use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
+use smithay::wayland::selection::{SelectionHandler, SelectionTarget};
+#[cfg(feature = "anland")]
+use smithay::wayland::selection::SelectionSource;
 use smithay::wayland::session_lock::{
     LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
 };
@@ -64,6 +66,7 @@ use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 
+#[cfg(feature = "anland")]
 use crate::backend::Backend;
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::input::click_grab::ClickGrab;
@@ -300,12 +303,8 @@ impl KeyboardShortcutsInhibitHandler for State {
 impl SelectionHandler for State {
     type SelectionUserData = Arc<[u8]>;
 
+    #[cfg(feature = "anland")]
     fn new_selection(
-        &mut self,
-        ty: SelectionTarget,
-        source: Option<SelectionSource>,
-        _seat: Seat<Self>,
-    ) {
         // Forward a client-set clipboard to the Android consumer.
         if ty == SelectionTarget::Clipboard {
             if let Some(source) = source {
