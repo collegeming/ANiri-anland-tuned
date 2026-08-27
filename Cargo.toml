@@ -130,7 +130,7 @@ cc = { version = "1.2", optional = true }
 pkg-config = "0.3.33"
 
 [features]
-default = ["dbus", "systemd", "xdp-gnome-screencast"]
+default = ["dbus", "systemd", "xdp-gnome-screencast", "anland"]
 # Enables the Anland backend (Android display/input/camera/audio producer).
 anland = ["dep:cc"]
 # Enables D-Bus support (serve various freedesktop and GNOME interfaces, accessibility tree, power button handling).
