@@ -305,6 +305,11 @@ impl SelectionHandler for State {
 
     #[cfg(feature = "anland")]
     fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
         // Forward a client-set clipboard to the Android consumer.
         if ty == SelectionTarget::Clipboard {
             if let Some(source) = source {
