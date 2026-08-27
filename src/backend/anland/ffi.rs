@@ -235,7 +235,12 @@ pub struct display_ctx {
 unsafe fn send_all(fd: c_int, buf: *const u8, len: usize) -> c_int {
     let mut off: usize = 0;
     while off < len {
-        let n = libc::send(fd, buf.add(off), len - off, libc::MSG_NOSIGNAL);
+        let n = libc::send(
+            fd,
+            buf.add(off) as *const c_void,
+            len - off,
+            libc::MSG_NOSIGNAL,
+        );
         if n <= 0 {
             if n < 0 && *libc::__errno_location() == libc::EINTR {
                 continue;
@@ -250,7 +255,7 @@ unsafe fn send_all(fd: c_int, buf: *const u8, len: usize) -> c_int {
 unsafe fn recv_all(fd: c_int, buf: *mut u8, len: usize) -> c_int {
     let mut off: usize = 0;
     while off < len {
-        let n = libc::recv(fd, buf.add(off), len - off, 0);
+        let n = libc::recv(fd, buf.add(off) as *mut c_void, len - off, 0);
         if n <= 0 {
             if n < 0 && *libc::__errno_location() == libc::EINTR {
                 continue;
@@ -267,12 +272,12 @@ unsafe fn send_fds(sock: c_int, data: *const u8, data_len: usize, fds: &[c_int])
         iov_base: data as *mut c_void,
         iov_len: data_len,
     };
-    let space = libc::CMSG_SPACE(fds.len() * std::mem::size_of::<c_int>());
+    let space = libc::CMSG_SPACE((fds.len() * std::mem::size_of::<c_int>()) as u32) as usize;
     let cmsg_buf = libc::malloc(space) as *mut u8;
     if cmsg_buf.is_null() {
         return -1;
     }
-    ptr::write_bytes(cmsg_buf, 0, space as usize);
+    ptr::write_bytes(cmsg_buf, 0, space);
     let mut msg: libc::msghdr = std::mem::zeroed();
     msg.msg_iov = &iov as *const libc::iovec as *mut libc::iovec;
     msg.msg_iovlen = 1;
@@ -281,7 +286,7 @@ unsafe fn send_fds(sock: c_int, data: *const u8, data_len: usize, fds: &[c_int])
     let cmsg = libc::CMSG_FIRSTHDR(&msg);
     (*cmsg).cmsg_level = libc::SOL_SOCKET;
     (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-    (*cmsg).cmsg_len = libc::CMSG_LEN(fds.len() * std::mem::size_of::<c_int>());
+    (*cmsg).cmsg_len = libc::CMSG_LEN((fds.len() * std::mem::size_of::<c_int>()) as u32) as usize;
     ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(cmsg) as *mut c_int, fds.len());
     let n = libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL);
     libc::free(cmsg_buf as *mut c_void);
@@ -304,12 +309,13 @@ unsafe fn recv_fds(
         iov_base: data as *mut c_void,
         iov_len: data_len,
     };
-    let space = libc::CMSG_SPACE(fd_count as usize * std::mem::size_of::<c_int>());
+    let space =
+        libc::CMSG_SPACE((fd_count as usize * std::mem::size_of::<c_int>()) as u32) as usize;
     let cmsg_buf = libc::malloc(space) as *mut u8;
     if cmsg_buf.is_null() {
         return -1;
     }
-    ptr::write_bytes(cmsg_buf, 0, space as usize);
+    ptr::write_bytes(cmsg_buf, 0, space);
     let mut msg: libc::msghdr = std::mem::zeroed();
     msg.msg_iov = &mut iov as *mut libc::iovec;
     msg.msg_iovlen = 1;
@@ -326,7 +332,7 @@ unsafe fn recv_fds(
         && (*cmsg).cmsg_level == libc::SOL_SOCKET
         && (*cmsg).cmsg_type == libc::SCM_RIGHTS
     {
-        let mut count = ((*cmsg).cmsg_len - libc::CMSG_LEN(0)) / std::mem::size_of::<c_int>();
+        let mut count = ((*cmsg).cmsg_len - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<c_int>();
         if count > fd_count as usize {
             count = fd_count as usize;
         }
@@ -690,10 +696,10 @@ pub unsafe fn trigger_refresh(ctx: *mut display_ctx) -> c_int {
         iov_base: &b as *const u8 as *mut c_void,
         iov_len: 1,
     };
-    let space = libc::CMSG_SPACE(std::mem::size_of::<c_int>());
+    let space = libc::CMSG_SPACE(std::mem::size_of::<c_int>() as u32) as usize;
     let cmsg_buf = libc::malloc(space) as *mut u8;
     if !cmsg_buf.is_null() {
-        ptr::write_bytes(cmsg_buf, 0, space as usize);
+        ptr::write_bytes(cmsg_buf, 0, space);
     }
     let mut msg: libc::msghdr = std::mem::zeroed();
     msg.msg_iov = &iov as *const libc::iovec as *mut libc::iovec;
@@ -704,7 +710,7 @@ pub unsafe fn trigger_refresh(ctx: *mut display_ctx) -> c_int {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<c_int>());
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<c_int>() as u32) as usize;
         ptr::copy_nonoverlapping(
             &ctx.pending_render_fence as *const c_int,
             libc::CMSG_DATA(cmsg) as *mut c_int,
