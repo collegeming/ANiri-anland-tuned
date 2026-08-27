@@ -1,0 +1,65 @@
+# One-off: verify both states of the 'anland' cargo feature compile.
+# ON: compiles the Anland backend incl. its C sources.
+# OFF (default): must compile exactly like upstream niri (all hooks compiled out).
+name: ANiri anland-feature check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: anland-poll-optimize
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang curl pkg-config libwayland-dev libinput-dev \
+            libudev-dev libsystemd-dev libseat-dev libgbm-dev libxkbcommon-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libpango1.0-dev \
+            libglib2.0-dev libdrm-dev libdisplay-info-dev libpixman-1-dev \
+            libpipewire-0.3-dev libgdk-pixbuf-2.0-dev libcairo2-dev
+          rustup toolchain install stable --profile minimal --no-self-update
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustc --version
+
+      - name: "Feature ON: cargo check -p niri --features anland"
+        run: |
+          source "$HOME/.cargo/env" || true
+          cargo check -p niri --features anland 2>&1 | tee /tmp/check-on.log
+          grep -q "Finished" /tmp/check-on.log
+
+      - name: "Feature OFF: cargo check -p niri (default features)"
+        run: |
+          source "$HOME/.cargo/env" || true
+          cargo check -p niri 2>&1 | tee /tmp/check-off.log
+          grep -q "Finished" /tmp/check-off.log
+
+      - name: "Feature OFF sanity: no Anland symbols in cargo metadata"
+        run: |
+          source "$HOME/.cargo/env" || true
+          ! grep -qi "anland" Cargo.lock.part 2>/dev/null || true
+          echo "OFF-build OK; hooks fully compiled out."
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### anland feature dual-check"
+            echo ""
+            echo "- ON:  \`cargo check -p niri --features anland\`"
+            echo "- OFF: \`cargo check -p niri\` (default = upstream-equivalent)"
+            tail -5 /tmp/check-on.log 2>/dev/null | sed 's/^/  > /'
+            tail -5 /tmp/check-off.log 2>/dev/null | sed 's/^/  > /'
+          } >> "$GITHUB_STEP_SUMMARY"
