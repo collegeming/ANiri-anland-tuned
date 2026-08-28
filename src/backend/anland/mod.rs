@@ -6,6 +6,10 @@
 //! hand over a native fence and `trigger_refresh()`, then wait for the consumer's
 //! buffer-ready signal before completing the frame.
 
+#[cfg(feature = "anland-av")]
+mod audio;
+#[cfg(feature = "anland-av")]
+mod camera;
 pub mod ffi;
 pub mod input;
 
@@ -293,12 +297,12 @@ impl Anland {
         self.create_dmabuf_global(niri);
         self.add_output(niri);
 
-        #[cfg(have_anland_audio)]
-        if unsafe { ffi::anland_audio_start() } != 0 {
+        #[cfg(feature = "anland-av")]
+        if audio::start() != 0 {
             warn!("anland: failed to start audio engine");
         }
-        #[cfg(have_anland_audio)]
-        if unsafe { ffi::anland_camera_start() } != 0 {
+        #[cfg(feature = "anland-av")]
+        if camera::start() != 0 {
             warn!("anland: failed to start camera engine");
         }
 
@@ -523,14 +527,11 @@ impl Anland {
 
         let in_fallback = unsafe { ffi::is_fallback(self.ctx) };
         if in_fallback {
-            #[cfg(have_anland_audio)]
-            unsafe {
-                ffi::anland_audio_set_fd(-1)
-            };
-            #[cfg(have_anland_audio)]
-            unsafe {
-                ffi::anland_camera_clear()
-            };
+            #[cfg(feature = "anland-av")]
+            {
+                audio::set_fd(-1);
+                camera::clear();
+            }
             if self.try_reconnect() {
                 self.on_reconnect(niri);
             }
@@ -631,14 +632,11 @@ impl Anland {
 
     fn on_reconnect(&mut self, niri: &mut Niri) {
         info!("anland: consumer connected");
-        #[cfg(have_anland_audio)]
-        unsafe {
-            ffi::anland_audio_set_fd(ffi::get_audio_fd(self.ctx));
-        }
-        // Ask the consumer for its camera service fds; it replies asynchronously
-        // with an INPUT_TYPE_RESOURCE event (a no-op if the consumer has no camera).
-        #[cfg(have_anland_audio)]
+        #[cfg(feature = "anland-av")]
         {
+            audio::set_fd(unsafe { ffi::get_audio_fd(self.ctx) });
+            // Ask the consumer for its camera service fds; it replies asynchronously
+            // with an INPUT_TYPE_RESOURCE event (a no-op if the consumer has no camera).
             let r = unsafe {
                 ffi::push_resources_request(self.ctx, ffi::SERVICE_TYPE_CAMERA, std::ptr::null())
             };
@@ -715,10 +713,10 @@ impl Anland {
                         }
                     }
                 }
-                #[cfg(have_anland_audio)]
+                #[cfg(feature = "anland-av")]
                 if t == ffi::INPUT_TYPE_RESOURCE {
                     let service = unsafe { raw.data.resource.type_ };
-                    self.handle_resource_reply(niri, service);
+                    self.handle_resource_reply(service);
                     return None;
                 }
                 input::translate(&self.input_backend, &raw)
@@ -733,8 +731,8 @@ impl Anland {
 
     /// The consumer replied to a service request with fds (INPUT_TYPE_RESOURCE).
     /// Receive the fds and hand them to the camera engine.
-    #[cfg(have_anland_audio)]
-    fn handle_resource_reply(&mut self, _niri: &mut Niri, service: u32) {
+    #[cfg(feature = "anland-av")]
+    fn handle_resource_reply(&mut self, service: u32) {
         let mut fds = [0; 9]; // ctrl + up to MAX_CAMERAS streams
         let fdnum =
             unsafe { ffi::poll_input_event_extend_fds(self.ctx, fds.as_mut_ptr(), 9, 5000) };
@@ -744,7 +742,7 @@ impl Anland {
         }
         if service == ffi::SERVICE_TYPE_CAMERA && fdnum >= 2 {
             unsafe {
-                ffi::anland_camera_set_resources(fds[0], fds.as_ptr().add(1), fdnum - 1);
+                camera::set_resources(fds[0], fds.as_ptr().add(1), fdnum - 1);
             }
         } else {
             for &fd in fds.iter().take(fdnum as usize) {
@@ -1093,13 +1091,10 @@ impl Drop for Anland {
             return;
         }
         self.disposed = true;
-        #[cfg(have_anland_audio)]
-        unsafe {
-            ffi::anland_audio_stop();
-        }
-        #[cfg(have_anland_audio)]
-        unsafe {
-            ffi::anland_camera_stop();
+        #[cfg(feature = "anland-av")]
+        {
+            audio::stop();
+            camera::stop();
         }
         if !self.ctx.is_null() {
             unsafe { ffi::disconnect(self.ctx) };

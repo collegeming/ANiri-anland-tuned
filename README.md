@@ -137,9 +137,14 @@ anland 的剪贴板和文本输入使用“固定事件头 + 变长 UTF-8 负载
 
 `clipboard.size == 0` 在 ANiri 中表示清空 compositor clipboard，而不是忽略事件。这为文本剪贴板双向同步保留了“空值即清空”的语义。
 
-### 4. 构建配置清理
+### 4. Rust 音频与相机构建
 
-为 anland 可选音频/相机编译路径声明自定义 cfg，避免新版 Rust 的 `unexpected_cfgs` 噪声，同时不强制引入这些可选组件。这不表示远程音频已经实现；当前 RDP 架构没有 RDPSND。
+anland 的显示 IPC、PipeWire 音频和相机桥接均已改为 Rust，不再编译项目内 C 源码，也不再直接依赖 `cc`。Cargo feature 分为两层：
+
+- `anland`：仅启用 Android 显示与输入后端，不引入 PipeWire；
+- `anland-av`：在 `anland` 之上启用远程音频与相机，并引入 PipeWire。
+
+默认构建同时启用两者，因此 release 仍包含完整功能；需要最小显示/输入构建时可使用 `--no-default-features --features anland`。
 
 ## 构建与启动
 

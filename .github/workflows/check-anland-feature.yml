@@ -1,6 +1,4 @@
-# One-off: verify both states of the 'anland' cargo feature compile.
-# ON: compiles the Anland backend incl. its C sources.
-# OFF (default): must compile exactly like upstream niri (all hooks compiled out).
+# Verify the Anland backend with and without its optional PipeWire AV bridges.
 name: ANiri anland-feature check
 
 on:
@@ -16,7 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
-          ref: anland-poll-optimize
           fetch-depth: 0
           show-progress: false
 
@@ -34,32 +31,33 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           rustc --version
 
-      - name: "Feature ON (default): cargo check -p niri"
+      - name: Display and input only (no PipeWire)
         run: |
-          source "$HOME/.cargo/env" || true
-          cargo check -p niri 2>&1 | tee /tmp/check-on.log
-          grep -q "Finished" /tmp/check-on.log
+          cargo check --locked -p niri --no-default-features --features anland
+          ! cargo tree --locked -p niri --no-default-features --features anland | grep -q 'pipewire v'
 
-      - name: "Feature OFF: cargo check -p niri --no-default-features --features dbus,systemd,xdp-gnome-screencast"
+      - name: Full Anland with Rust AV
         run: |
-          source "$HOME/.cargo/env" || true
-          cargo check -p niri --no-default-features --features dbus,systemd,xdp-gnome-screencast 2>&1 | tee /tmp/check-off.log
-          grep -q "Finished" /tmp/check-off.log
+          cargo check --locked -p niri --no-default-features --features anland-av
+          cargo test --locked -p niri --no-default-features --features anland-av \
+            backend::anland::
 
-      - name: "Feature OFF sanity: no Anland symbols in cargo metadata"
+      - name: Anland disabled
         run: |
-          source "$HOME/.cargo/env" || true
-          ! grep -qi "anland" Cargo.lock.part 2>/dev/null || true
-          echo "OFF-build OK; hooks fully compiled out."
+          cargo check --locked -p niri --no-default-features --features dbus,systemd
+
+      - name: Default release feature set
+        run: |
+          cargo check --locked -p niri
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "### anland feature dual-check"
+            echo "### Anland feature matrix"
             echo ""
-            echo "- ON:  \`cargo check -p niri --features anland\`"
-            echo "- OFF: \`cargo check -p niri\` (default = upstream-equivalent)"
-            tail -5 /tmp/check-on.log 2>/dev/null | sed 's/^/  > /'
-            tail -5 /tmp/check-off.log 2>/dev/null | sed 's/^/  > /'
+            echo "- \`anland\`: display/input only, no PipeWire"
+            echo "- \`anland-av\`: Rust PipeWire audio/camera"
+            echo "- disabled: upstream-style backend set"
+            echo "- default: full release feature set"
           } >> "$GITHUB_STEP_SUMMARY"

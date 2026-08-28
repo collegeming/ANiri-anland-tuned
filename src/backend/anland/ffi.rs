@@ -2,18 +2,18 @@
 //!
 //! Historically this was a C library (`libdisplay_producer` + `socket_utils`);
 //! it has been ported to Rust. The public surface (function names, signatures,
-//! and the `display_ctx` opaque handle) is preserved verbatim so the backend
-//! code in `mod.rs` is unchanged. The audio/camera bridges (`anland_audio_*`,
-//! `anland_camera_*`) remain C and are linked when `have_anland_audio` is set.
+//! and the `display_ctx` opaque handle) is preserved verbatim.
 
 #![allow(non_camel_case_types)]
 #![allow(dead_code)]
+#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 
 pub const MAX_BUFS: usize = 8;
+const WIRE_BUF_INFO_BYTES: usize = 28;
 
 // protocol.h input event types
 pub const INPUT_TYPE_TOUCH: u32 = 1;
@@ -267,33 +267,11 @@ unsafe fn recv_all(fd: c_int, buf: *mut u8, len: usize) -> c_int {
     0
 }
 
-unsafe fn send_fds(sock: c_int, data: *const u8, data_len: usize, fds: &[c_int]) -> c_int {
-    let iov = libc::iovec {
-        iov_base: data as *mut c_void,
-        iov_len: data_len,
-    };
-    let space = libc::CMSG_SPACE((fds.len() * std::mem::size_of::<c_int>()) as u32) as usize;
-    let cmsg_buf = libc::malloc(space) as *mut u8;
-    if cmsg_buf.is_null() {
-        return -1;
-    }
-    ptr::write_bytes(cmsg_buf, 0, space);
-    let mut msg: libc::msghdr = std::mem::zeroed();
-    msg.msg_iov = &iov as *const libc::iovec as *mut libc::iovec;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf as *mut c_void;
-    msg.msg_controllen = space;
-    let cmsg = libc::CMSG_FIRSTHDR(&msg);
-    (*cmsg).cmsg_level = libc::SOL_SOCKET;
-    (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-    (*cmsg).cmsg_len = libc::CMSG_LEN((fds.len() * std::mem::size_of::<c_int>()) as u32) as usize;
-    ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(cmsg) as *mut c_int, fds.len());
-    let n = libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL);
-    libc::free(cmsg_buf as *mut c_void);
-    if n == data_len as isize {
-        0
-    } else {
-        -1
+unsafe fn close_fds(fds: &[c_int]) {
+    for &fd in fds {
+        if fd >= 0 {
+            libc::close(fd);
+        }
     }
 }
 
@@ -305,6 +283,11 @@ unsafe fn recv_fds(
     fd_count: c_int,
     fds_received: *mut c_int,
 ) -> c_int {
+    *fds_received = 0;
+    if fd_count <= 0 {
+        return -1;
+    }
+
     let mut iov = libc::iovec {
         iov_base: data as *mut c_void,
         iov_len: data_len,
@@ -321,25 +304,58 @@ unsafe fn recv_fds(
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf as *mut c_void;
     msg.msg_controllen = space;
-    let n = libc::recvmsg(sock, &mut msg, 0);
+    let n = libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC);
     if n <= 0 {
         libc::free(cmsg_buf as *mut c_void);
         return -1;
     }
-    *fds_received = 0;
-    let cmsg = libc::CMSG_FIRSTHDR(&msg);
-    if !cmsg.is_null()
-        && (*cmsg).cmsg_level == libc::SOL_SOCKET
-        && (*cmsg).cmsg_type == libc::SCM_RIGHTS
-    {
-        let mut count = ((*cmsg).cmsg_len - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<c_int>();
-        if count > fd_count as usize {
-            count = fd_count as usize;
+
+    let control_start = cmsg_buf as usize;
+    let control_end = control_start.saturating_add(msg.msg_controllen);
+    let header_len = libc::CMSG_LEN(0) as usize;
+    let mut received = Vec::with_capacity(fd_count as usize);
+    let mut invalid = msg.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0;
+    let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+    while !invalid && !cmsg.is_null() {
+        let start = cmsg as usize;
+        let len = (*cmsg).cmsg_len;
+        if start < control_start
+            || len < header_len
+            || start.checked_add(len).is_none_or(|end| end > control_end)
+        {
+            invalid = true;
+            break;
         }
-        ptr::copy_nonoverlapping(libc::CMSG_DATA(cmsg) as *const c_int, fds, count);
-        *fds_received = count as c_int;
+
+        if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
+            let payload_len = len - header_len;
+            if !payload_len.is_multiple_of(std::mem::size_of::<c_int>()) {
+                invalid = true;
+                break;
+            }
+            let values = libc::CMSG_DATA(cmsg) as *const c_int;
+            for i in 0..payload_len / std::mem::size_of::<c_int>() {
+                let fd = *values.add(i);
+                if received.len() < fd_count as usize {
+                    received.push(fd);
+                } else {
+                    libc::close(fd);
+                }
+            }
+        }
+        cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
     }
+
     libc::free(cmsg_buf as *mut c_void);
+    if invalid {
+        for fd in received {
+            libc::close(fd);
+        }
+        return -1;
+    }
+
+    ptr::copy_nonoverlapping(received.as_ptr(), fds, received.len());
+    *fds_received = received.len() as c_int;
     n as c_int
 }
 
@@ -352,11 +368,14 @@ unsafe fn connect_unix(path: *const c_char) -> c_int {
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
     let path_bytes = CStr::from_ptr(path).to_bytes();
     let cap = addr.sun_path.len() - 1;
-    let copy_len = path_bytes.len().min(cap);
+    if path_bytes.len() > cap {
+        libc::close(fd);
+        return -1;
+    }
     ptr::copy_nonoverlapping(
         path_bytes.as_ptr(),
         addr.sun_path.as_mut_ptr() as *mut u8,
-        copy_len,
+        path_bytes.len(),
     );
     // sun_path is zero-initialized, so it remains NUL-terminated.
     if libc::connect(
@@ -459,12 +478,12 @@ unsafe fn pickup_fds(ctx: &mut display_ctx) -> c_int {
         5,
         &mut fd_count,
     );
-    if n <= 0 || resp.type_ != CTRL_MSG_FDS_READY || fd_count < 5 {
-        for i in 0..fd_count as usize {
-            if fds[i] >= 0 {
-                libc::close(fds[i]);
-            }
-        }
+    if n != std::mem::size_of::<ctrl_msg>() as c_int
+        || resp.type_ != CTRL_MSG_FDS_READY
+        || resp.size != 0
+        || fd_count != 5
+    {
+        close_fds(&fds[..fd_count as usize]);
         return -1;
     }
 
@@ -488,6 +507,15 @@ unsafe fn pickup_fds(ctx: &mut display_ctx) -> c_int {
     }
     ctx.shm_ptr = mapped as *mut u32;
     0
+}
+
+fn dmabuf_wire_count(size: usize, fd_count: usize) -> Option<usize> {
+    let count = size.checked_div(WIRE_BUF_INFO_BYTES)?;
+    (size <= MAX_BUFS * WIRE_BUF_INFO_BYTES
+        && size.is_multiple_of(WIRE_BUF_INFO_BYTES)
+        && count == fd_count
+        && count <= MAX_BUFS)
+        .then_some(count)
 }
 
 unsafe fn receive_dmabufs_inner(ctx: &mut display_ctx) -> c_int {
@@ -515,20 +543,12 @@ unsafe fn receive_dmabufs_inner(ctx: &mut display_ctx) -> c_int {
         &mut fd_count,
     );
     if n < std::mem::size_of::<data_msg>() as c_int || fd_count < 1 {
-        for i in 0..fd_count as usize {
-            if fds[i] >= 0 {
-                libc::close(fds[i]);
-            }
-        }
+        close_fds(&fds[..fd_count as usize]);
         return -1;
     }
 
     if dhdr.type_ != DATA_MSG_BUFS_READY {
-        for i in 0..fd_count as usize {
-            if fds[i] >= 0 {
-                libc::close(fds[i]);
-            }
-        }
+        close_fds(&fds[..fd_count as usize]);
         return -1;
     }
 
@@ -536,46 +556,35 @@ unsafe fn receive_dmabufs_inner(ctx: &mut display_ctx) -> c_int {
     // (32 bytes with 4 bytes tail padding). Field offsets 0..27 match, so we
     // recv the packed bytes contiguously, then copy 28 per element into the
     // repr(C) struct (the trailing padding stays zero from `default()`).
-    const WIRE_BUF_INFO: usize = 28;
-    let count = dhdr.size as usize / WIRE_BUF_INFO;
-    if count != fd_count as usize || count > MAX_BUFS {
-        for i in 0..fd_count as usize {
-            if fds[i] >= 0 {
-                libc::close(fds[i]);
-            }
-        }
+    let wire_size = dhdr.size as usize;
+    let Some(count) = dmabuf_wire_count(wire_size, fd_count as usize) else {
+        close_fds(&fds[..fd_count as usize]);
         return -1;
-    }
+    };
 
-    let mut wire = [0u8; MAX_BUFS * WIRE_BUF_INFO];
-    if recv_all(ctx.data_fd, wire.as_mut_ptr(), dhdr.size as usize) < 0 {
-        for i in 0..fd_count as usize {
-            if fds[i] >= 0 {
-                libc::close(fds[i]);
-            }
-        }
+    let mut wire = [0u8; MAX_BUFS * WIRE_BUF_INFO_BYTES];
+    if recv_all(ctx.data_fd, wire.as_mut_ptr(), wire_size) < 0 {
+        close_fds(&fds[..fd_count as usize]);
         return -1;
     }
     let mut infos: [buf_info; MAX_BUFS] = [buf_info::default(); MAX_BUFS];
-    for i in 0..count {
+    for (info, bytes) in infos
+        .iter_mut()
+        .zip(wire.chunks_exact(WIRE_BUF_INFO_BYTES))
+        .take(count)
+    {
         ptr::copy_nonoverlapping(
-            wire.as_ptr().add(i * WIRE_BUF_INFO),
-            &mut infos[i] as *mut buf_info as *mut u8,
-            WIRE_BUF_INFO,
+            bytes.as_ptr(),
+            info as *mut buf_info as *mut u8,
+            WIRE_BUF_INFO_BYTES,
         );
     }
 
     // Drop the previous set, then install the new one.
-    for i in 0..ctx.buf_count as usize {
-        if ctx.dmabuf_fds[i] >= 0 {
-            libc::close(ctx.dmabuf_fds[i]);
-            ctx.dmabuf_fds[i] = -1;
-        }
-    }
-    for i in 0..count {
-        ctx.dmabuf_fds[i] = fds[i];
-        ctx.dmabuf_infos[i] = infos[i];
-    }
+    close_fds(&ctx.dmabuf_fds[..ctx.buf_count as usize]);
+    ctx.dmabuf_fds[..ctx.buf_count as usize].fill(-1);
+    ctx.dmabuf_fds[..count].copy_from_slice(&fds[..count]);
+    ctx.dmabuf_infos[..count].copy_from_slice(&infos[..count]);
     ctx.buf_count = count as c_int;
     0
 }
@@ -636,8 +645,7 @@ pub unsafe fn connect_to_deamon(out: *mut *mut display_ctx, socket_path: *const 
     }
 
     let resp = *(buf.as_ptr() as *const ctrl_msg);
-    if resp.type_ != CTRL_MSG_SCREEN_INFO
-        || resp.size != std::mem::size_of::<screen_info>() as u32
+    if resp.type_ != CTRL_MSG_SCREEN_INFO || resp.size != std::mem::size_of::<screen_info>() as u32
     {
         libc::close(ctx.ctrl_fd);
         return -1;
@@ -725,17 +733,17 @@ pub unsafe fn trigger_refresh(ctx: *mut display_ctx) -> c_int {
             1,
         );
     }
-    libc::sendmsg(
-        ctx.fence_fd,
-        &msg,
-        libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
-    );
+    let sent = libc::sendmsg(ctx.fence_fd, &msg, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT);
     if !cmsg_buf.is_null() {
         libc::free(cmsg_buf as *mut c_void);
     }
     if ctx.pending_render_fence >= 0 {
         libc::close(ctx.pending_render_fence);
         ctx.pending_render_fence = -1;
+    }
+    if sent != 1 {
+        enter_fallback(ctx);
+        return -1;
     }
     0
 }
@@ -784,16 +792,21 @@ pub unsafe fn poll_input_event(
         return -2;
     }
 
-    if hdr.type_ != DATA_MSG_INPUT_EVENT {
+    if hdr.type_ != DATA_MSG_INPUT_EVENT || hdr.size != std::mem::size_of::<InputEvent>() as u32 {
+        enter_fallback(ctx);
+        return -1;
+    }
+    if n < msg_buf.len() as isize {
         return 0;
     }
 
     if recv_all(ctx.data_fd, msg_buf.as_mut_ptr(), msg_buf.len()) < 0 {
+        enter_fallback(ctx);
         return -1;
     }
 
     ptr::copy_nonoverlapping(
-        msg_buf.as_ptr().add(std::mem::size_of::<data_msg>()) as *const u8,
+        msg_buf.as_ptr().add(std::mem::size_of::<data_msg>()),
         event as *mut u8,
         std::mem::size_of::<InputEvent>(),
     );
@@ -860,13 +873,12 @@ pub unsafe fn poll_input_event_extend_fds(
         fd_count,
         &mut received,
     );
-    if n < std::mem::size_of::<data_msg>() as c_int || received < 1 {
-        return -1;
-    }
-    if hdr.type_ != DATA_MSG_INPUT_EXTEND_FDS {
-        for i in 0..received as usize {
-            libc::close(*fds.add(i));
-        }
+    if n != std::mem::size_of::<data_msg>() as c_int
+        || received < 1
+        || hdr.type_ != DATA_MSG_INPUT_EXTEND_FDS
+        || hdr.size != 0
+    {
+        close_fds(std::slice::from_raw_parts(fds, received.max(0) as usize));
         return -1;
     }
     received
@@ -888,7 +900,7 @@ unsafe fn push_output_event(ctx: *mut display_ctx, event: *const OutputEvent) ->
         std::mem::size_of::<data_msg>(),
     );
     ptr::copy_nonoverlapping(
-        event as *const OutputEvent as *const u8,
+        event.cast::<u8>(),
         msg.as_mut_ptr().add(std::mem::size_of::<data_msg>()),
         std::mem::size_of::<OutputEvent>(),
     );
@@ -921,7 +933,7 @@ pub unsafe fn push_output_event_with_length(
         std::mem::size_of::<data_msg>(),
     );
     ptr::copy_nonoverlapping(
-        event as *const OutputEvent as *const u8,
+        event.cast::<u8>(),
         msg.as_mut_ptr().add(std::mem::size_of::<data_msg>()),
         std::mem::size_of::<OutputEvent>(),
     );
@@ -1049,14 +1061,22 @@ pub unsafe fn get_dmabuf_info_at(ctx: *mut display_ctx, idx: c_int, info: *mut b
     0
 }
 
-// Audio/camera bridges remain C (linked when have_anland_audio is set).
-#[cfg(have_anland_audio)]
-extern "C" {
-    pub fn anland_audio_start() -> c_int;
-    pub fn anland_audio_stop();
-    pub fn anland_audio_set_fd(audio_fd: c_int);
-    pub fn anland_camera_start() -> c_int;
-    pub fn anland_camera_stop();
-    pub fn anland_camera_set_resources(ctrl_fd: c_int, stream_fds: *const c_int, num_cameras: c_int);
-    pub fn anland_camera_clear();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dmabuf_wire_size_must_be_exact_and_bounded() {
+        assert_eq!(dmabuf_wire_count(WIRE_BUF_INFO_BYTES, 1), Some(1));
+        assert_eq!(
+            dmabuf_wire_count(MAX_BUFS * WIRE_BUF_INFO_BYTES, MAX_BUFS),
+            Some(MAX_BUFS)
+        );
+        assert_eq!(dmabuf_wire_count(WIRE_BUF_INFO_BYTES - 1, 1), None);
+        assert_eq!(dmabuf_wire_count(WIRE_BUF_INFO_BYTES, 2), None);
+        assert_eq!(
+            dmabuf_wire_count(MAX_BUFS * WIRE_BUF_INFO_BYTES + 1, MAX_BUFS),
+            None
+        );
+    }
 }

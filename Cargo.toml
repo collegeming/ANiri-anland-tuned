@@ -80,7 +80,7 @@ niri-ipc = { version = "26.4.0", path = "niri-ipc", features = ["clap"] }
 ordered-float = "5.3.0"
 pango = { version = "0.21.5", features = ["v1_44"] }
 pangocairo = "0.21.5"
-pipewire = { version = "0.10.0", optional = true, features = ["v0_3_33"] }
+pipewire = { version = "0.10.0", optional = true, features = ["v0_3_49"] }
 png = "0.18.1"
 portable-atomic = "1"
 profiling = "1.0.18"
@@ -126,19 +126,20 @@ wayland-client = "0.31.15"
 xshell = "0.2.7"
 
 [build-dependencies]
-cc = { version = "1.2", optional = true }
 pkg-config = "0.3.33"
 
 [features]
-default = ["dbus", "systemd", "xdp-gnome-screencast", "anland"]
-# Enables the Anland backend (Android display/input/camera/audio producer).
-anland = ["dep:cc"]
+default = ["dbus", "systemd", "xdp-gnome-screencast", "anland", "anland-av"]
+# Enables the Anland display and input backend.
+anland = []
+# Enables the Anland PipeWire audio and camera bridges.
+anland-av = ["anland", "dep:pipewire"]
 # Enables D-Bus support (serve various freedesktop and GNOME interfaces, accessibility tree, power button handling).
 dbus = ["dep:zbus", "dep:async-io", "dep:accesskit", "dep:accesskit_unix"]
 # Enables systemd integration (global environment, apps in transient scopes).
 systemd = ["dbus"]
 # Enables screencasting support through xdg-desktop-portal-gnome.
-xdp-gnome-screencast = ["dbus", "pipewire"]
+xdp-gnome-screencast = ["dbus", "dep:pipewire"]
 # Enables the Tracy profiler instrumentation.
 profile-with-tracy = ["profiling/profile-with-tracy", "tracy-client/default", "smithay/tracy_gpu_profiling"]
 # Enables the on-demand Tracy profiler instrumentation.
