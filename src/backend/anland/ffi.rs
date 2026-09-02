@@ -316,7 +316,9 @@ unsafe fn recv_fds(
     let mut received = Vec::with_capacity(fd_count as usize);
     let mut invalid = msg.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0;
     let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-    while !invalid && !cmsg.is_null() {
+    // Collect unconditionally even when the kernel truncated the control buffer
+    // (MSG_CTRUNC): the fds it already installed must be closed, not leaked.
+    while !cmsg.is_null() {
         let start = cmsg as usize;
         let len = (*cmsg).cmsg_len;
         if start < control_start

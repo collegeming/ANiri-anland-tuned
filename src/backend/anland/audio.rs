@@ -759,6 +759,9 @@ fn playback_process(stream: &pw::stream::Stream, callbacks: &mut PlaybackCallbac
     let Some(payload) = bytes.get(offset..end) else {
         return;
     };
+    if payload.is_empty() {
+        return; // matches the C bridge: an empty period is not a PCM message
+    }
     let socket = callbacks.socket.borrow().clone();
     if let Some(socket) = socket {
         send_pcm(socket.as_raw_fd(), payload);

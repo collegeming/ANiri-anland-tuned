@@ -102,6 +102,16 @@ pub fn start() -> i32 {
     let mut global = engine()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if global
+        .as_ref()
+        .is_some_and(|current| current.worker.is_finished())
+    {
+        // The worker panicked; its channel receiver died with it. Join the stale
+        // handle and respawn on the next call instead of reporting success forever.
+        if let Some(stale) = global.take() {
+            let _ = stale.worker.join();
+        }
+    }
     if global.is_some() {
         return 0;
     }
@@ -1283,6 +1293,9 @@ fn reader_main(
                             // wedge the producer's double buffer.
                             let _ = send_stream(stream.as_raw_fd(), STREAM_DONE, message.slot);
                             if let Some(pixels) = pixels {
+                                // Mapping is good; stop the maintenance-timer GET_SHM churn.
+                                needs_shm = false;
+                                shm_requested = false;
                                 let should_notify = {
                                     let mut latest = mailbox
                                         .lock()
