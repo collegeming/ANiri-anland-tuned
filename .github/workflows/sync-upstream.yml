@@ -1,0 +1,160 @@
+# Daily upstream sync: merge niri-wm/niri:main into anland-poll-optimize.
+#
+# After the one-off first sync (PR #1), anland-poll-optimize has real niri
+# ancestry, so no baseline graft is needed — a plain `git merge` suffices.
+# Merge (not rebase) is used because the branch contains merge commits and we
+# must not rewrite history (release tags are anchored to existing commits).
+#
+# - Already in sync: skip.
+# - Clean merge: push to anland-poll-optimize (fast, no force-push).
+# - Conflicts: push a sync branch + open a PR for manual resolution.
+name: ANiri upstream sync
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # 06:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: aniri-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: niri-wm/niri
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: anland-poll-optimize
+
+jobs:
+  sync:
+    name: Merge niri-wm/niri:main into anland-poll-optimize
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout target branch (full history)
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          show-progress: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          echo "UPSTREAM_SHA=$(git rev-parse "upstream/$UPSTREAM_BRANCH")" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHORT=$(git rev-parse --short=12 "upstream/$UPSTREAM_BRANCH")" >> "$GITHUB_ENV"
+          echo "TARGET_SHA=$(git rev-parse "$TARGET_BRANCH")" >> "$GITHUB_ENV"
+
+      - name: Check if upstream is already contained
+        id: need
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" "$TARGET_BRANCH"; then
+            echo "result=none" >> "$GITHUB_OUTPUT"
+            echo "Already in sync with $UPSTREAM_REPO@$UPSTREAM_SHORT."
+          else
+            echo "result=sync" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attempt clean merge
+        id: merge
+        if: steps.need.outputs.result == 'sync'
+        run: |
+          set +e
+          git merge "upstream/$UPSTREAM_BRANCH" --no-edit >/tmp/merge.log 2>&1
+          cat /tmp/merge.log
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            git merge --abort
+            echo "outcome=conflict" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=clean" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push (clean merge)
+        if: steps.merge.outputs.outcome == 'clean'
+        run: |
+          set -euo pipefail
+          # Restore fork workflows (don't let upstream's clobber the ARM64 ones).
+          git checkout "$TARGET_BRANCH" -- .github/workflows
+          git add .github/workflows
+          git commit --amend --no-edit >/dev/null || true
+          git push origin "$TARGET_BRANCH"
+          echo "::notice::Merged $UPSTREAM_REPO@$UPSTREAM_SHORT into $TARGET_BRANCH and pushed."
+
+      - name: Open conflict-resolution PR
+        if: steps.merge.outputs.outcome == 'conflict'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BR="sync/niri-upstream-${UPSTREAM_SHORT}"
+          # Start the PR head from upstream/main, restore fork workflows so the
+          # push introduces no .github/workflows change (GITHUB_TOKEN can't).
+          git checkout -B "$BR" "upstream/$UPSTREAM_BRANCH"
+          rm -rf .github/workflows
+          git checkout "$TARGET_BRANCH" -- .github/workflows
+          git add .github/workflows
+          git commit -m "chore(sync): keep fork workflow files" --no-verify >/dev/null
+          git push --force origin "$BR"
+          COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${TARGET_BRANCH}...${BR}"
+          PR_BODY=$(cat <<EOF
+          Automatic upstream merge from \`$UPSTREAM_REPO:$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\` failed with conflicts and needs manual resolution.
+
+          - Upstream HEAD: $UPSTREAM_SHA
+          - Target HEAD (before sync): $TARGET_SHA
+
+          Resolve locally:
+          \`\`\`bash
+          git remote add upstream https://github.com/$UPSTREAM_REPO.git
+          git fetch upstream $UPSTREAM_BRANCH
+          git checkout $TARGET_BRANCH
+          git merge upstream/$UPSTREAM_BRANCH
+          # resolve conflicts, keep fork's .github/workflows, then:
+          git push origin $TARGET_BRANCH
+          \`\`\`
+          cc @${{ github.repository_owner }}
+          EOF
+          )
+          existing=$(gh pr list --base "$TARGET_BRANCH" --head "$BR" --state open --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            gh pr comment "$existing" --body "Re-ran sync; conflicts still present upstream @ \`$UPSTREAM_SHORT\`." || true
+          else
+            gh pr create --base "$TARGET_BRANCH" --head "$BR" \
+              --title "sync: merge $UPSTREAM_REPO@$UPSTREAM_SHORT (conflicts)" \
+              --body "$PR_BODY" || \
+            echo "PR_CREATE_BLOCKED"
+          fi
+          echo "COMPARE_URL=$COMPARE_URL" >> "$GITHUB_ENV"
+          echo "::warning::Upstream merge produced conflicts; resolve via $COMPARE_URL"
+
+      - name: Summary
+        if: always()
+        run: |
+          r="${{ steps.need.outputs.result }}"
+          o="${{ steps.merge.outputs.outcome }}"
+          case "$r" in
+            none) msg="already in sync" ;;
+            sync) case "$o" in
+                    clean)    msg="merged & pushed" ;;
+                    conflict) msg="conflicts -> resolve via ${COMPARE_URL:-PR}" ;;
+                    *)        msg="merge did not run" ;;
+                  esac ;;
+            *) msg="n/a" ;;
+          esac
+          {
+            echo "### Upstream sync summary"
+            echo ""
+            echo "- Upstream: \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` @ \`$UPSTREAM_SHORT\`"
+            echo "- Outcome: $msg"
+          } >> "$GITHUB_STEP_SUMMARY"
