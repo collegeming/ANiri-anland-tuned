@@ -1,0 +1,62 @@
+# One-off diagnostic v3 (merge mode): graft baseline, merge niri-wm/niri:main,
+# dump ALL conflict blocks (CRLF-agnostic) for every conflicted file.
+name: ANiri sync diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: niri-wm/niri
+  UPSTREAM_BRANCH: main
+  TARGET_BRANCH: anland-poll-optimize
+  ORPHAN_ROOT: 1a33594f42efef6415096de504214269d82c247d
+  BASELINE_COMMIT: 8ed0da44d974c32c6877d2f4630c314da0717ecb
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Fetch upstream & graft
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+          git replace --graft "$ORPHAN_ROOT" "$BASELINE_COMMIT"
+
+      - name: Merge & dump conflicts
+        run: |
+          set +e
+          git merge "upstream/$UPSTREAM_BRANCH" --no-edit >/tmp/m.log 2>&1
+          cat /tmp/m.log
+          cat > /tmp/dump.py <<'PY'
+          import re, sys
+          for f in sys.argv[1:]:
+              try:
+                  with open(f, encoding='utf-8', errors='surrogateescape') as fh:
+                      t = fh.read()
+              except Exception as e:
+                  print(f"!! cannot read {f}: {e}"); continue
+              pat = re.compile(r'<<<<<<< [^\n]*\r?\n(.*?)=======\r?\n(.*?)>>>>>>>[^\n]*\r?\n', re.S)
+              blocks = list(pat.finditer(t))
+              print(f"\n############### FILE: {f}  ({len(blocks)} block(s)) ################")
+              for i,m in enumerate(blocks,1):
+                  head=m.group(1); theirs=m.group(2)
+                  print(f"--- block {i} HEAD (anland/ours) [{len(head)} chars] ---")
+                  print(head[:1200])
+                  print(f"--- block {i} THEIRS (upstream) [{len(theirs)} chars] ---")
+                  print(theirs[:1200])
+          PY
+          python3 /tmp/dump.py $(git diff --name-only --diff-filter=U)
+          exit 0
