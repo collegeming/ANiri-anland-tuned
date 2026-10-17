@@ -1,0 +1,63 @@
+# Verify the Anland backend with and without its optional PipeWire AV bridges.
+name: ANiri anland-feature check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang curl pkg-config libwayland-dev libinput-dev \
+            libudev-dev libsystemd-dev libseat-dev libgbm-dev libxkbcommon-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libpango1.0-dev \
+            libglib2.0-dev libdrm-dev libdisplay-info-dev libpixman-1-dev \
+            libpipewire-0.3-dev libgdk-pixbuf-2.0-dev libcairo2-dev
+          rustup toolchain install stable --profile minimal --no-self-update
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustc --version
+
+      - name: Display and input only (no PipeWire)
+        run: |
+          cargo check --locked -p niri --no-default-features --features anland
+          ! cargo tree --locked -p niri --no-default-features --features anland | grep -q 'pipewire v'
+
+      - name: Full Anland with Rust AV
+        run: |
+          cargo check --locked -p niri --no-default-features --features anland-av
+          cargo test --locked -p niri --no-default-features --features anland-av \
+            backend::anland::
+
+      - name: Anland disabled
+        run: |
+          cargo check --locked -p niri --no-default-features --features dbus,systemd
+
+      - name: Default release feature set
+        run: |
+          cargo check --locked -p niri
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Anland feature matrix"
+            echo ""
+            echo "- \`anland\`: display/input only, no PipeWire"
+            echo "- \`anland-av\`: Rust PipeWire audio/camera"
+            echo "- disabled: upstream-style backend set"
+            echo "- default: full release feature set"
+          } >> "$GITHUB_STEP_SUMMARY"
