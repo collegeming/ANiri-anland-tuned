@@ -1,31 +1,25 @@
-# Candidate verification for the tuned implementation and subsequent workflow commits.
-name: ANiri ARM64 candidate
+# Publish only as .github/workflows/ci.yml on ci/frame-callback-diag.
+name: niri frame callback ARM64 diagnostics
 
 on:
-  push:
-    branches:
-      - anland-poll-optimize
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: aniri-arm64-candidate-${{ github.ref }}
+  group: niri-frame-${{ github.ref }}
   cancel-in-progress: false
 
 env:
+  NIRI_COMMIT: 8ed0da44d974c32c6877d2f4630c314da0717ecb
+  SMITHAY_COMMIT: ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef
+  RUST_VERSION: 1.95.0
   CARGO_TERM_COLOR: always
-  IMPLEMENTATION_COMMIT: 74ce2a92eb2151d729818a784ced605ec950b56c
-  CLIPPY_SOURCE_COMMIT: 1999f7cfb9c7ffdd02d79edf35fdf98df7eafe18
-  ARCH_BASE_IMAGE: docker.io/ogarcia/archlinux:latest@sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
-  ARCH_BASE_INDEX_DIGEST: sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
-  ARCH_BASE_ARM64_MANIFEST_DIGEST: sha256:019992bf3dc54ab4ba1515dd80e613d473b2ca7a97e410e1da053ae501b6383d
-  ARCH_BASE_LAYER_DIGEST: sha256:c714810994102b031ad2f2319282528593ae84ce86b5131b82e859642e3c79f4
+  ARCH_IMAGE: docker.io/ogarcia/archlinux:latest@sha256:f92ed48cdfc274181f16e94e6a4e90e4c90c59a3d14fc7a133483a93ebc16ec6
 
 jobs:
-  verify-and-build:
-    name: Verify and build ARM64 candidate in Arch Linux
+  build:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     container:
@@ -33,174 +27,145 @@ jobs:
     defaults:
       run:
         shell: bash
-
     steps:
-      - name: Install Arch build and Builder-equivalent runtime packages
+      - name: Install compatible native Arch build dependencies once for both variants
         run: |
           set -euo pipefail
           test "$(uname -m)" = aarch64
-          grep -qxF 'Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist || \
-            sed -i '1i Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo' /etc/pacman.d/mirrorlist
-          pacman -Sy --noconfirm archlinux-keyring
-          pacman -Su --noconfirm
+          pacman -Syu --noconfirm
           pacman -S --noconfirm --needed \
-            base-devel binutils clang cmake curl file git github-cli jq pkgconf rustup \
-            dbus wayland wayland-protocols \
-            libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm \
-            libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb \
-            libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config \
-            pipewire libpipewire
+            base-devel binutils clang cmake curl file git pkgconf python rustup \
+            dbus wayland wayland-protocols libinput pango glib2 libdisplay-info \
+            mesa seatd systemd-libs libdrm libxkbcommon libevdev libwacom lua \
+            freetype2 fontconfig libx11 libxcb libffi pcre2 libgudev pixman \
+            libxrender libxext xkeyboard-config pipewire libpipewire
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
+          rustup default "$RUST_VERSION"
+          printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Check out candidate source
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - name: Check out reviewed patchers from this isolated branch
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
         with:
-          fetch-depth: 0
+          path: recipe
+          persist-credentials: false
           show-progress: false
 
-      - name: Trust only the exact checkout directory
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Select Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
-          printf '%s\n' "$HOME/.cargo/bin" >>"$GITHUB_PATH"
-          rustc --version --verbose
-          cargo --version --verbose
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check workspace
-        run: cargo check --workspace --all-targets --exclude niri-visual-tests --locked
-
-      - name: Run tests
-        run: cargo test --workspace --exclude niri-visual-tests --locked -- --nocapture
-
-      - name: Run strict Clippy
-        run: cargo clippy --workspace --all-targets --exclude niri-visual-tests --locked -- -D warnings
-
-      - name: Build native Arch ARM64 release binary
-        env:
-          NIRI_BUILD_COMMIT: ${{ github.sha }}
-        run: cargo build --frozen --release --bin niri
-
-      - name: Generate CycloneDX SBOM
-        run: |
-          set -euo pipefail
-          cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo cyclonedx --format json --override-filename ANiri-SBOM
-          test -s ANiri-SBOM.json
-
-      - name: Assemble and verify candidate assets
-        env:
-          SOURCE_COMMIT: ${{ github.sha }}
-          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = aarch64
-          install -Dm755 target/release/niri dist/niri-arm64-linux-bin
-          install -Dm644 LICENSE dist/LICENSE
-          install -Dm644 ANiri-SBOM.json dist/ANiri-SBOM.cdx.json
-
-          runtime_packages=(
-            libinput pango glib2 libdisplay-info mesa seatd systemd-libs libdrm
-            libxkbcommon libevdev libwacom lua freetype2 fontconfig libx11 libxcb
-            libffi pcre2 libgudev pixman libxrender libxext xkeyboard-config
-            pipewire libpipewire
-          )
-          build_packages=(
-            base-devel binutils clang cmake curl file git github-cli jq pkgconf
-            rustup dbus wayland wayland-protocols
-          )
-          pacman -Q "${runtime_packages[@]}" >dist/ARCH-RUNTIME-PACKAGES.txt
-          pacman -Q "${build_packages[@]}" >dist/ARCH-BUILD-PACKAGES.txt
-
-          binary_version=$(dist/niri-arm64-linux-bin --version)
-          elf_header=$(file dist/niri-arm64-linux-bin)
-          interpreter=$(readelf -lW dist/niri-arm64-linux-bin | sed -n 's/.*Requesting program interpreter: \([^]]*\).*/\1/p')
-          test "$interpreter" = /lib/ld-linux-aarch64.so.1
-          test -e "$interpreter"
-          readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Class:[[:space:]]+ELF64'
-          readelf -h dist/niri-arm64-linux-bin | grep -Eq 'Machine:[[:space:]]+AArch64'
-          readelf -dW dist/niri-arm64-linux-bin | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' >dist/ELF-NEEDED.txt
-          test -s dist/ELF-NEEDED.txt
-
-          : >dist/ELF-SONAME-RESOLUTION.txt
-          while IFS= read -r soname; do
-            resolved=$(ldconfig -p | awk -v soname="$soname" '$1 == soname { print $NF; exit }')
-            if [[ -z "$resolved" ]]; then
-              for candidate in "/usr/lib/$soname" "/lib/$soname"; do
-                if [[ -e "$candidate" ]]; then
-                  resolved=$candidate
-                  break
-                fi
-              done
-            fi
-            if [[ -z "$resolved" || ! -e "$resolved" ]]; then
-              printf 'Unresolved direct ELF dependency: %s\n' "$soname" >&2
-              exit 1
-            fi
-            owner=$(pacman -Qo "$resolved" 2>/dev/null || true)
-            printf '%s\t%s\t%s\n' "$soname" "$(readlink -f "$resolved")" "$owner" >>dist/ELF-SONAME-RESOLUTION.txt
-          done <dist/ELF-NEEDED.txt
-
-          ldd dist/niri-arm64-linux-bin >dist/LDD.txt
-          if grep -F 'not found' dist/LDD.txt; then
-            exit 1
-          fi
-
-          cat >dist/NOTICE.txt <<'NOTICE'
-          ANiri is a downstream niri build for the Anland/Droidspaces integration.
-          The project is licensed under GPL-3.0-or-later; see the accompanying LICENSE.
-          Third-party Rust package names, versions, licenses, and dependency relationships
-          are recorded in ANiri-SBOM.cdx.json.
-          NOTICE
-
-          {
-            printf 'SOURCE_REPOSITORY=%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-            printf 'SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
-            printf 'IMPLEMENTATION_COMMIT=%s\n' "$IMPLEMENTATION_COMMIT"
-            printf 'CLIPPY_SOURCE_COMMIT=%s\n' "$CLIPPY_SOURCE_COMMIT"
-            printf 'WORKFLOW_COMMIT=%s\n' "$WORKFLOW_COMMIT"
-            printf 'TAG=candidate\n'
-            printf 'TAG_OBJECT=none\n'
-            printf 'TARGET=aarch64-unknown-linux-gnu\n'
-            printf 'BUILD_DISTRO=Arch Linux ARM64\n'
-            printf 'ARCH_BASE_IMAGE=%s\n' "$ARCH_BASE_IMAGE"
-            printf 'ARCH_BASE_INDEX_DIGEST=%s\n' "$ARCH_BASE_INDEX_DIGEST"
-            printf 'ARCH_BASE_ARM64_MANIFEST_DIGEST=%s\n' "$ARCH_BASE_ARM64_MANIFEST_DIGEST"
-            printf 'ARCH_BASE_LAYER_DIGEST=%s\n' "$ARCH_BASE_LAYER_DIGEST"
-            printf 'RUNNER_ARCH=%s\n' "$RUNNER_ARCH"
-            printf 'UNAME_MACHINE=%s\n' "$(uname -m)"
-            printf 'RUSTC=%s\n' "$(rustc --version)"
-            printf 'CARGO=%s\n' "$(cargo --version)"
-            printf 'BINARY_VERSION=%s\n' "$binary_version"
-            printf 'ELF=%s\n' "$elf_header"
-            printf 'INTERPRETER=%s\n' "$interpreter"
-            printf 'ARCH_RUNTIME_PACKAGES_BEGIN\n'; cat dist/ARCH-RUNTIME-PACKAGES.txt; printf 'ARCH_RUNTIME_PACKAGES_END\n'
-            printf 'ARCH_BUILD_PACKAGES_BEGIN\n'; cat dist/ARCH-BUILD-PACKAGES.txt; printf 'ARCH_BUILD_PACKAGES_END\n'
-            printf 'ELF_NEEDED_BEGIN\n'; cat dist/ELF-NEEDED.txt; printf 'ELF_NEEDED_END\n'
-            printf 'ELF_SONAME_RESOLUTION_BEGIN\n'; cat dist/ELF-SONAME-RESOLUTION.txt; printf 'ELF_SONAME_RESOLUTION_END\n'
-            printf 'DYNAMIC_DEPENDENCIES_BEGIN\n'; cat dist/LDD.txt; printf 'DYNAMIC_DEPENDENCIES_END\n'
-          } >dist/BUILD-METADATA.txt
-
-          (cd dist && sha256sum \
-            niri-arm64-linux-bin ANiri-SBOM.cdx.json BUILD-METADATA.txt \
-            ARCH-RUNTIME-PACKAGES.txt ARCH-BUILD-PACKAGES.txt ELF-NEEDED.txt \
-            ELF-SONAME-RESOLUTION.txt LDD.txt LICENSE NOTICE.txt >SHA256SUMS)
-          (cd dist && sha256sum --check SHA256SUMS)
-          dist/niri-arm64-linux-bin --version
-          file dist/niri-arm64-linux-bin
-          cat dist/ELF-NEEDED.txt
-          cat dist/ELF-SONAME-RESOLUTION.txt
-          cat dist/LDD.txt
-
-      - name: Upload candidate assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Check out exact upstream niri
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
         with:
-          name: aniri-arm64-arch-candidate-${{ github.sha }}
+          repository: niri-wm/niri
+          ref: 8ed0da44d974c32c6877d2f4630c314da0717ecb
+          path: baseline/niri
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out exact upstream Smithay
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        with:
+          repository: Smithay/smithay
+          ref: ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef
+          path: baseline/smithay
+          persist-credentials: false
+          show-progress: false
+
+      - name: Verify identities and apply identical local dependency mapping
+        run: |
+          set -euo pipefail
+          # Only exact Actions-created checkouts are trusted.
+          for p in recipe baseline/niri baseline/smithay; do
+            git config --global --add safe.directory "$GITHUB_WORKSPACE/$p"
+          done
+          test "$(git -C baseline/niri rev-parse HEAD)" = "$NIRI_COMMIT"
+          test "$(git -C baseline/smithay rev-parse HEAD)" = "$SMITHAY_COMMIT"
+          test -z "$(git -C baseline/niri status --porcelain)"
+          test -z "$(git -C baseline/smithay status --porcelain)"
+          mkdir diagnostic dist
+          cp -a baseline/niri diagnostic/niri
+          cp -a baseline/smithay diagnostic/smithay
+          for p in diagnostic/niri diagnostic/smithay; do
+            git config --global --add safe.directory "$GITHUB_WORKSPACE/$p"
+          done
+          python3 -I recipe/scripts/niri-frame-patch.py "$GITHUB_WORKSPACE/baseline/niri" --mode baseline
+          python3 -I recipe/scripts/niri-frame-patch.py "$GITHUB_WORKSPACE/diagnostic/niri" --mode diagnostic
+          python3 -I recipe/scripts/niri-frame-smithay-patch.py "$GITHUB_WORKSPACE/diagnostic/smithay"
+          cmp baseline/niri/Cargo.toml diagnostic/niri/Cargo.toml
+          cmp baseline/niri/Cargo.lock diagnostic/niri/Cargo.lock
+          git -C baseline/niri diff -- Cargo.toml Cargo.lock > dist/local-dependency.patch
+          git -C diagnostic/niri diff -- src/niri.rs src/backend/winit.rs > dist/niri-diagnostic.patch
+          git -C diagnostic/smithay diff -- src/desktop/wayland/utils.rs > dist/smithay-diagnostic.patch
+          test -s dist/local-dependency.patch
+          test -s dist/niri-diagnostic.patch
+          test -s dist/smithay-diagnostic.patch
+          cp baseline/niri/Cargo.lock dist/Cargo.lock
+          cp baseline/niri/LICENSE dist/LICENSE
+          cp recipe/scripts/niri-frame-{patch.py,smithay-patch.py,ci.yml} dist/
+          printf 'NIRI_FRAME_PREPARE_COMPLETE\n'
+
+      - name: Fetch once, verify frozen dependency graph, and build both binaries
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          export RUSTUP_TOOLCHAIN="$RUST_VERSION"
+          cargo fetch --locked --manifest-path baseline/niri/Cargo.toml
+          sha256sum baseline/niri/Cargo.lock diagnostic/niri/Cargo.lock > dist/lock-before.txt
+          for variant in baseline diagnostic; do
+            cargo metadata --frozen --format-version 1 --manifest-path "$variant/niri/Cargo.toml" > "dist/$variant-cargo-metadata.json"
+            # Exact blobs establish the formatting baseline; parse all generated Rust,
+            # then format only those files (do not reformat unrelated upstream files).
+            if [ "$variant" = diagnostic ]; then
+              rustfmt --edition 2021 diagnostic/niri/src/niri.rs diagnostic/niri/src/backend/winit.rs
+              rustfmt --edition 2024 diagnostic/smithay/src/desktop/wayland/utils.rs
+            fi
+            NIRI_BUILD_COMMIT="$NIRI_COMMIT" cargo build --frozen --release --bin niri --manifest-path "$variant/niri/Cargo.toml"
+            install -m755 "$CARGO_TARGET_DIR/release/niri" "dist/niri-frame-$variant"
+            readelf -h "dist/niri-frame-$variant" | grep -Eq 'Machine:[[:space:]]+AArch64'
+            "dist/niri-frame-$variant" --version > "dist/$variant-version.txt"
+            ldd "dist/niri-frame-$variant" > "dist/$variant-ldd.txt"
+            if grep -F 'not found' "dist/$variant-ldd.txt"; then exit 1; fi
+            readelf -dW "dist/niri-frame-$variant" > "dist/$variant-dynamic.txt"
+          done
+          sha256sum --check dist/lock-before.txt
+          cmp baseline/niri/Cargo.lock diagnostic/niri/Cargo.lock
+          # Preserve the precise compiled patches after formatting.
+          git -C diagnostic/niri diff -- src/niri.rs src/backend/winit.rs > dist/niri-diagnostic.patch
+          git -C diagnostic/smithay diff -- src/desktop/wayland/utils.rs > dist/smithay-diagnostic.patch
+          printf 'NIRI_FRAME_BUILD_COMPLETE\n'
+
+      - name: Verify resolved package identity, record provenance, checksum artifacts
+        run: |
+          set -euo pipefail
+          python3 -I - <<'PY'
+          import json
+          from pathlib import Path
+          def graph(variant):
+              data = json.loads(Path(f'dist/{variant}-cargo-metadata.json').read_text())
+              prefix = str(Path(variant).resolve())
+              def normalize(value):
+                  return value.replace(prefix, '<variant>')
+              packages = sorted((normalize(p['id']), p['name'], p['version'], p['source'], normalize(p['manifest_path'])) for p in data['packages'])
+              nodes = sorted((normalize(n['id']), sorted(normalize(d) for d in n['dependencies']), sorted(n['features'])) for n in data['resolve']['nodes'])
+              return packages, nodes
+          assert graph('baseline') == graph('diagnostic'), 'dependency graph mismatch'
+          Path('dist/dependency-identity.txt').write_text('baseline and diagnostic resolved packages, dependencies and features identical\n')
+          PY
+          pacman -Q > dist/build-packages.txt
+          rustc -Vv > dist/rustc.txt
+          cargo -Vv > dist/cargo.txt
+          {
+            printf 'NIRI_COMMIT=%s\nSMITHAY_COMMIT=%s\n' "$NIRI_COMMIT" "$SMITHAY_COMMIT"
+            printf 'RECIPE_COMMIT=%s\nWORKFLOW_COMMIT=%s\n' "$GITHUB_SHA" '${{ github.workflow_sha }}'
+            printf 'ARCH_IMAGE=%s\nRUNNER_ARCH=%s\n' "$ARCH_IMAGE" "$RUNNER_ARCH"
+            printf 'TARGET=aarch64-unknown-linux-gnu\nFEATURES=default\nBUILD=cargo build --frozen --release --bin niri\n'
+            printf 'GATE=NIRI_FRAME_DIAG=1\nLIMIT=NIRI_FRAME_DIAG_LIMIT (default 2000, max 10000 per component)\n'
+            printf 'SCOPE=nested-only; no throttle or scheduling changes; no release/install\n'
+          } > dist/BUILD-METADATA.txt
+          (cd dist && sha256sum -- * > SHA256SUMS && sha256sum --check SHA256SUMS)
+          printf 'NIRI_FRAME_CI_COMPLETE\n'
+
+      - name: Upload binaries and reproducibility metadata only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: niri-frame-arm64-${{ github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
